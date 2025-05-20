@@ -1,0 +1,110 @@
+name: Build and Deploy Whisper.cpp to EC2
+
+on:
+  push:
+    branches: [development]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake g++ git
+
+      - name: Build whisper.cpp
+        run: |
+          # Build with optimizations
+          make clean
+          WHISPER_CFLAGS="-O3 -march=native" make -j
+
+          # Test the build
+          ./main -h
+
+          # Create models directory
+          mkdir -p models
+
+      - name: Download model
+        run: |
+          bash ./models/download-ggml-model.sh base.en
+
+      - name: Package application
+        run: |
+          mkdir -p whisper_package
+          cp -r main models samples whisper_package/
+          tar -czvf whisper_package.tar.gz whisper_package/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload package to S3
+        run: |
+          aws s3 cp whisper_package.tar.gz s3://${{ secrets.S3_BUCKET }}/whisper_package.tar.gz
+
+      - name: Deploy to EC2 using SSM
+        run: |
+          # Create deployment script
+          cat > deploy.sh << 'EOL'
+          #!/bin/bash
+          set -e
+
+          # Install dependencies
+          sudo apt-get update
+          sudo apt-get install -y awscli
+
+          # Create application directory
+          mkdir -p /opt/whisper
+
+          # Download package from S3
+          aws s3 cp s3://$S3_BUCKET/whisper_package.tar.gz /tmp/whisper_package.tar.gz
+
+          # Extract package
+          tar -xzvf /tmp/whisper_package.tar.gz -C /opt/
+          mv /opt/whisper_package/* /opt/whisper/
+
+          # Set permissions
+          chmod +x /opt/whisper/main
+
+          # Create systemd service (if needed for background processing)
+          cat > /tmp/whisper.service << 'EOF'
+          [Unit]
+          Description=Whisper Speech Recognition Service
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          WorkingDirectory=/opt/whisper
+          ExecStart=/opt/whisper/main -m /opt/whisper/models/ggml-base.en.bin -f /opt/whisper/samples/jfk.wav
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          sudo mv /tmp/whisper.service /etc/systemd/system/
+          sudo systemctl daemon-reload
+          sudo systemctl enable whisper.service
+          sudo systemctl start whisper.service
+
+          echo "Whisper.cpp deployed successfully!"
+          EOL
+
+          # Execute command on EC2 instance using SSM
+          aws ssm send-command \
+            --instance-ids ${{ secrets.EC2_INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands="$(cat deploy.sh)" \
+            --output text
