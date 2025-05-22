@@ -23,7 +23,8 @@ WORKDIR /app
 COPY . .
 
 # Build whisper.cpp with optimizations
-RUN WHISPER_CFLAGS="-O3 -march=native" make -j$(nproc)
+RUN make clean && \
+    WHISPER_CFLAGS="-O3 -march=native" make -j$(nproc)
 
 # Create models directory
 RUN mkdir -p models
@@ -31,6 +32,9 @@ RUN mkdir -p models
 # Download base model
 RUN bash ./models/download-ggml-model.sh base.en
 
-# Set up entrypoint
-ENTRYPOINT ["./main"]
-CMD ["-h"] 
+# Make sure main is executable
+RUN chmod +x build/bin/main
+
+# Set up entrypoint with correct path
+ENTRYPOINT ["/app/build/bin/main"]
+CMD ["-h"]
