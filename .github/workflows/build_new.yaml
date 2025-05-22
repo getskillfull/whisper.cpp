@@ -37,7 +37,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ steps.login-ecr.outputs.registry }}/whisper-cpp:latest
+          tags: ${{ steps.login-ecr.outputs.registry }}/whisper:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -60,7 +60,7 @@ jobs:
           aws ecr get-login-password --region $AWS_REGION | sudo docker login --username AWS --password-stdin $ECR_REGISTRY
 
           # Pull the latest image
-          sudo docker pull $ECR_REGISTRY/whisper-cpp:latest
+          sudo docker pull $ECR_REGISTRY/whisper:latest
 
           # Stop and remove existing container if it exists
           sudo docker stop whisper-cpp || true
@@ -76,7 +76,7 @@ jobs:
             --restart unless-stopped \
             -v /opt/whisper/models:/app/models \
             -v /opt/whisper/samples:/app/samples \
-            $ECR_REGISTRY/whisper-cpp:latest
+            $ECR_REGISTRY/whisper:latest
 
           echo "Whisper.cpp deployed successfully!"
           EOL
