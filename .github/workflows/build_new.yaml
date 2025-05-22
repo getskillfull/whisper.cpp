@@ -56,11 +56,15 @@ jobs:
               sudo systemctl start docker
           fi
 
+          # Set ECR registry
+          ECR_REGISTRY="819669852177.dkr.ecr.us-east-1.amazonaws.com"
+          AWS_REGION="us-east-1"
+
           # Login to ECR
-          aws ecr get-login-password --region $AWS_REGION | sudo docker login --username AWS --password-stdin $ECR_REGISTRY
+          aws ecr get-login-password --region ${AWS_REGION} | sudo docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
           # Pull the latest image
-          sudo docker pull $ECR_REGISTRY/skillfull/whisper:latest
+          sudo docker pull ${ECR_REGISTRY}/skillfull/whisper:latest
 
           # Stop and remove existing container if it exists
           sudo docker stop whisper-cpp || true
@@ -76,7 +80,11 @@ jobs:
             --restart unless-stopped \
             -v /opt/whisper/models:/app/models \
             -v /opt/whisper/samples:/app/samples \
-            $ECR_REGISTRY/skillfull/whisper:latest
+            ${ECR_REGISTRY}/skillfull/whisper:latest
+
+          # Verify container is running
+          echo "Checking container status..."
+          sudo docker ps | grep whisper-cpp
 
           echo "Whisper.cpp deployed successfully!"
           EOL
