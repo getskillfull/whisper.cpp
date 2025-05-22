@@ -35,7 +35,7 @@ RUN bash ./models/download-ggml-model.sh base.en
 RUN chmod +x build/bin/whisper-cli
 
 # Install Python dependencies
-RUN pip3 install flask werkzeug
+RUN pip3 install flask werkzeug boto3
 
 # Copy API server
 COPY api.py .
