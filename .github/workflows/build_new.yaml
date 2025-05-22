@@ -56,9 +56,19 @@ jobs:
               sudo systemctl start docker
           fi
 
+          # Install AWS CLI if not installed
+          if ! command -v aws &> /dev/null; then
+              sudo apt-get update
+              sudo apt-get install -y awscli
+          fi
+
           # Set ECR registry
           ECR_REGISTRY="819669852177.dkr.ecr.us-east-1.amazonaws.com"
           AWS_REGION="us-east-1"
+
+          # Configure AWS credentials using instance profile
+          # The EC2 instance should have an IAM role with ECR permissions
+          # No need to configure credentials manually
 
           # Login to ECR
           aws ecr get-login-password --region ${AWS_REGION} | sudo docker login --username AWS --password-stdin ${ECR_REGISTRY}
