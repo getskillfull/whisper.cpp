@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     libavformat-dev \
     libavutil-dev \
     libswresample-dev \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
