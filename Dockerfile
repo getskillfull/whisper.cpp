@@ -31,9 +31,9 @@ RUN mkdir -p models
 # Download base model
 RUN bash ./models/download-ggml-model.sh base.en
 
-# Make sure main is executable
-RUN chmod +x build/bin/main
+# Make sure whisper-cli is executable
+RUN chmod +x build/bin/whisper-cli
 
 # Set up entrypoint with correct path
-ENTRYPOINT ["/app/build/bin/main"]
+ENTRYPOINT ["/app/build/bin/whisper-cli"]
 CMD ["-h"]
