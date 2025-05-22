@@ -1,0 +1,30 @@
+FROM ubuntu:22.04
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy the whisper.cpp source code
+COPY . .
+
+# Build whisper.cpp with optimizations
+RUN make clean && \
+    WHISPER_CFLAGS="-O3 -march=native" make -j
+
+# Create models directory
+RUN mkdir -p models
+
+# Download base model
+RUN bash ./models/download-ggml-model.sh base.en
+
+# Set up entrypoint
+ENTRYPOINT ["./main"]
+CMD ["-h"] 

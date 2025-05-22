@@ -1,4 +1,4 @@
-name: Build and Deploy Whisper.cpp to EC2
+name: Build and Deploy Whisper.cpp with Docker
 
 on:
   push:
@@ -15,32 +15,21 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake g++ git
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
-      - name: Build whisper.cpp
-        run: |
-          # Build with optimizations
-          make clean
-          WHISPER_CFLAGS="-O3 -march=native" make -j
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
 
-          # Test the build
-          ./main -h
-
-          # Create models directory
-          mkdir -p models
-
-      - name: Download model
-        run: |
-          bash ./models/download-ggml-model.sh base.en
-
-      - name: Package application
-        run: |
-          mkdir -p whisper_package
-          cp -r main models samples whisper_package/
-          tar -czvf whisper_package.tar.gz whisper_package/
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.login-ecr.outputs.registry }}/whisper:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -49,55 +38,42 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Upload package to S3
-        run: |
-          aws s3 cp whisper_package.tar.gz s3://${{ secrets.S3_BUCKET }}/whisper_package.tar.gz
-
-      - name: Deploy to EC2 using SSM
+      - name: Deploy to EC2
         run: |
           # Create deployment script
           cat > deploy.sh << 'EOL'
           #!/bin/bash
           set -e
 
-          # Install dependencies
-          sudo apt-get update
-          sudo apt-get install -y awscli
+          # Install Docker if not installed
+          if ! command -v docker &> /dev/null; then
+              sudo apt-get update
+              sudo apt-get install -y docker.io
+              sudo systemctl enable docker
+              sudo systemctl start docker
+          fi
 
-          # Create application directory
-          mkdir -p /opt/whisper
+          # Login to ECR
+          aws ecr get-login-password --region $AWS_REGION | sudo docker login --username AWS --password-stdin $ECR_REGISTRY
 
-          # Download package from S3
-          aws s3 cp s3://$S3_BUCKET/whisper_package.tar.gz /tmp/whisper_package.tar.gz
+          # Pull the latest image
+          sudo docker pull $ECR_REGISTRY/whisper-cpp:latest
 
-          # Extract package
-          tar -xzvf /tmp/whisper_package.tar.gz -C /opt/
-          mv /opt/whisper_package/* /opt/whisper/
+          # Stop and remove existing container if it exists
+          sudo docker stop whisper-cpp || true
+          sudo docker rm whisper-cpp || true
 
-          # Set permissions
-          chmod +x /opt/whisper/main
+          # Create necessary directories
+          sudo mkdir -p /opt/whisper/models
+          sudo mkdir -p /opt/whisper/samples
 
-          # Create systemd service (if needed for background processing)
-          cat > /tmp/whisper.service << 'EOF'
-          [Unit]
-          Description=Whisper Speech Recognition Service
-          After=network.target
-
-          [Service]
-          Type=simple
-          User=ubuntu
-          WorkingDirectory=/opt/whisper
-          ExecStart=/opt/whisper/main -m /opt/whisper/models/ggml-base.en.bin -f /opt/whisper/samples/jfk.wav
-          Restart=on-failure
-
-          [Install]
-          WantedBy=multi-user.target
-          EOF
-
-          sudo mv /tmp/whisper.service /etc/systemd/system/
-          sudo systemctl daemon-reload
-          sudo systemctl enable whisper.service
-          sudo systemctl start whisper.service
+          # Run the new container
+          sudo docker run -d \
+            --name whisper-cpp \
+            --restart unless-stopped \
+            -v /opt/whisper/models:/app/models \
+            -v /opt/whisper/samples:/app/samples \
+            $ECR_REGISTRY/whisper-cpp:latest
 
           echo "Whisper.cpp deployed successfully!"
           EOL
