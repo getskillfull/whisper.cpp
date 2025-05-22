@@ -45,3 +45,6 @@ EXPOSE 5000
 
 # Set up entrypoint to run the API server
 ENTRYPOINT ["python3", "api.py"]
+
+# Create samples directory
+RUN mkdir -p /opt/whisper/samples
