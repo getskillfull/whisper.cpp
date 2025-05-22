@@ -23,8 +23,7 @@ WORKDIR /app
 COPY . .
 
 # Build whisper.cpp with optimizations
-RUN make clean && \
-    WHISPER_CFLAGS="-O3 -march=native" make -j$(nproc)
+RUN WHISPER_CFLAGS="-O3 -march=native" make -j$(nproc)
 
 # Create models directory
 RUN mkdir -p models
