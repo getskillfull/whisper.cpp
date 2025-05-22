@@ -34,6 +34,14 @@ RUN bash ./models/download-ggml-model.sh base.en
 # Make sure whisper-cli is executable
 RUN chmod +x build/bin/whisper-cli
 
-# Set up entrypoint with correct path
-ENTRYPOINT ["/app/build/bin/whisper-cli"]
-CMD ["-h"]
+# Install Python dependencies
+RUN pip3 install flask werkzeug
+
+# Copy API server
+COPY api.py .
+
+# Expose the API port
+EXPOSE 5000
+
+# Set up entrypoint to run the API server
+ENTRYPOINT ["python3", "api.py"]
