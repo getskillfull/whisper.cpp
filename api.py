@@ -1,10 +1,11 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 import os
 import subprocess
 import tempfile
 from werkzeug.utils import secure_filename
 import boto3
 from botocore.exceptions import ClientError
+from flask_socketio import SocketIO, emit
 
 app = Flask(__name__)
 
@@ -14,6 +15,9 @@ ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'm4a'}
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+
+# Initialize SocketIO
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -122,5 +126,21 @@ def transcribe():
 def health_check():
     return jsonify({'status': 'healthy'})
 
+@socketio.on('connect')
+def handle_connect():
+    emit('message', {'data': 'Connected to Whisper WebSocket server.'})
+
+@socketio.on('audio_chunk')
+def handle_audio_chunk(data):
+    # data['chunk'] should be the audio bytes (base64-encoded or raw)
+    # For demonstration, we'll just echo the chunk size
+    # In production, you would buffer and process with a streaming model
+    emit('partial_result', {'text': f"Received chunk of size {len(data['chunk'])}"})
+
+@socketio.on('end_stream')
+def handle_end_stream(data):
+    # Here you would finalize transcription and send the final result
+    emit('final_result', {'text': 'Transcription complete.'})
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000) 
+    socketio.run(app, host='0.0.0.0', port=5000) 
