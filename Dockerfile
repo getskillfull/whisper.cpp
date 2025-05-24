@@ -35,7 +35,7 @@ RUN bash ./models/download-ggml-model.sh base.en
 RUN chmod +x build/bin/whisper-cli
 
 # Install Python dependencies
-RUN pip3 install flask werkzeug boto3 flask-socketio eventlet
+RUN pip3 install flask werkzeug boto3 flask-socketio eventlet gunicorn
 
 # Copy API server
 COPY api.py .
@@ -43,8 +43,8 @@ COPY api.py .
 # Expose the API port
 EXPOSE 5000
 
-# Use eventlet as the default worker for Flask-SocketIO
-CMD ["python3", "api.py"]
+# Use Gunicorn with eventlet worker for production
+CMD ["gunicorn", "--worker-class", "eventlet", "--workers", "1", "--bind", "0.0.0.0:5000", "api:app"]
 
 # Create samples directory
 RUN mkdir -p /opt/whisper/samples
