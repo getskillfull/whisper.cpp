@@ -23,14 +23,13 @@ sudo docker rm whisper-cpp || true
 sudo mkdir -p /opt/whisper/models
 sudo mkdir -p /opt/whisper/samples
 
-# Run the new container with required dependencies
+# Run the new container
 sudo docker run -d \
   --name whisper-cpp \
   --restart unless-stopped \
   -p 5000:5000 \
   -v /opt/whisper/models:/app/models \
   -v /opt/whisper/samples:/app/samples \
-  819669852177.dkr.ecr.us-east-1.amazonaws.com/skillfull/whisper:latest \
-  bash -c "pip3 install numpy flask-socketio eventlet && python3 api.py"
+  819669852177.dkr.ecr.us-east-1.amazonaws.com/skillfull/whisper:latest
 
 echo "Whisper.cpp deployed successfully!" 
