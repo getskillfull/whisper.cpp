@@ -13,6 +13,11 @@ import numpy as np
 from threading import Lock
 import queue
 import time
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -31,6 +36,20 @@ stream_buffers = {}
 stream_locks = {}
 CHUNK_SIZE = 1024  # Size of audio chunks in bytes
 SAMPLE_RATE = 16000  # Whisper expects 16kHz audio
+
+# Ensure required directories exist
+def ensure_directories():
+    try:
+        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+        os.makedirs('/app/models', exist_ok=True)
+        os.makedirs('/app/samples', exist_ok=True)
+        logger.info("Required directories created/verified")
+    except Exception as e:
+        logger.error(f"Error creating directories: {e}")
+        raise
+
+# Call ensure_directories at startup
+ensure_directories()
 
 def create_wav_header(sample_rate, channels=1, sample_width=2):
     """Create a WAV header for the given parameters"""
@@ -255,4 +274,9 @@ def handle_end_stream(data):
         emit('final_result', {'text': 'Stream ended successfully'})
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False) 
+    try:
+        logger.info("Starting Flask application...")
+        socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+    except Exception as e:
+        logger.error(f"Error starting Flask application: {e}")
+        raise 
