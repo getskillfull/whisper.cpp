@@ -1,50 +1,41 @@
 FROM ubuntu:22.04
 
-# Install build dependencies
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
     git \
     python3 \
     python3-pip \
-    pkg-config \
-    libsdl2-dev \
-    libavcodec-dev \
-    libavformat-dev \
-    libavutil-dev \
-    libswresample-dev \
-    wget \
+    python3-venv \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
+
+# Create and activate virtual environment
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    flask \
+    flask-socketio \
+    eventlet \
+    boto3 \
+    numpy \
+    openai-whisper
+
+# Create necessary directories
+RUN mkdir -p /opt/whisper/samples
 
 # Set working directory
 WORKDIR /app
 
-# Copy the whisper.cpp source code
-COPY . .
+# Copy application files
+COPY api.py /app/
+COPY requirements.txt /app/
 
-# Build whisper.cpp with optimizations
-RUN WHISPER_CFLAGS="-O3 -march=native" make -j$(nproc)
-
-# Create models directory
-RUN mkdir -p models
-
-# Download base model
-RUN bash ./models/download-ggml-model.sh base.en
-
-# Make sure whisper-cli is executable
-RUN chmod +x build/bin/whisper-cli
-
-# Install Python dependencies
-RUN pip3 install flask werkzeug boto3 flask-socketio eventlet numpy
-
-# Copy API server
-COPY api.py .
-
-# Expose the API port
+# Expose port
 EXPOSE 5000
 
-# Create samples directory
-RUN mkdir -p /opt/whisper/samples
-
-# Set up entrypoint to run the API server
+# Run the application
 CMD ["python3", "api.py"]

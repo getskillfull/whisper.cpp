@@ -14,6 +14,7 @@ from threading import Lock
 import queue
 import time
 import logging
+import whisper
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -34,6 +35,16 @@ stream_buffers = {}
 stream_locks = {}
 CHUNK_SIZE = 1024  # Size of audio chunks in bytes
 SAMPLE_RATE = 16000  # Whisper expects 16kHz audio
+MIN_AUDIO_LENGTH = 0.1  # Minimum audio length in seconds (100ms)
+
+# Initialize whisper model
+try:
+    logger.info("Loading Whisper model...")
+    model = whisper.load_model("base.en")
+    logger.info("Whisper model loaded successfully")
+except Exception as e:
+    logger.error(f"Failed to load Whisper model: {e}")
+    raise
 
 def create_wav_header(sample_rate, channels=1, sample_width=2):
     """Create a WAV header for the given parameters"""
@@ -56,6 +67,19 @@ def create_wav_header(sample_rate, channels=1, sample_width=2):
     header.extend((0).to_bytes(4, 'little'))  # Data chunk size (to be filled later)
     return header
 
+def pad_audio_with_silence(audio_data, target_length_ms=100):
+    """Pad audio data with silence to reach target length"""
+    current_length_ms = len(audio_data) / SAMPLE_RATE * 1000
+    if current_length_ms >= target_length_ms:
+        return audio_data
+        
+    # Calculate number of silence samples needed
+    silence_samples = int((target_length_ms - current_length_ms) * SAMPLE_RATE / 1000)
+    silence = np.zeros(silence_samples, dtype=np.int16)
+    
+    # Combine original audio with silence
+    return np.concatenate([audio_data, silence])
+
 def process_audio_chunk(chunk_data, session_id):
     """Process an audio chunk and return transcription"""
     try:
@@ -65,12 +89,18 @@ def process_audio_chunk(chunk_data, session_id):
             logger.info("Converting base64 to bytes...")
             chunk_data = base64.b64decode(chunk_data)
         
+        # Convert bytes to numpy array
+        audio_data = np.frombuffer(chunk_data, dtype=np.int16)
+        
+        # Pad audio if too short
+        audio_data = pad_audio_with_silence(audio_data)
+        
         # Create a temporary WAV file
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
             logger.info("Creating temporary WAV file...")
             
             # Calculate sizes
-            data_size = len(chunk_data)
+            data_size = len(audio_data) * 2  # 2 bytes per sample
             file_size = data_size + 44  # 44 is the size of the WAV header
             
             # Write WAV header
@@ -82,34 +112,21 @@ def process_audio_chunk(chunk_data, session_id):
             
             # Write header and audio data
             temp_file.write(header)
-            temp_file.write(chunk_data)
+            temp_file.write(audio_data.tobytes())
             temp_file.flush()
             
-            logger.info(f"Running whisper-cli on {temp_file.name}")
-            # Run whisper-cli on the chunk
-            result = subprocess.run([
-                '/app/build/bin/whisper-cli',
-                '-m', '/app/models/ggml-base.en.bin',
-                '-f', temp_file.name,
-                '--print-progress',
-                '--no-timestamps',
-                '--language', 'en'
-            ], capture_output=True, text=True)
+            logger.info(f"Running whisper on {temp_file.name}")
+            # Run whisper on the chunk
+            result = model.transcribe(temp_file.name, language="en")
             
             # Clean up
             os.unlink(temp_file.name)
             
-            if result.returncode == 0:
-                logger.info(f"Whisper-cli stdout: {result.stdout}")
-                logger.info(f"Whisper-cli stderr: {result.stderr}")
-                if result.stdout.strip():
-                    return result.stdout.strip()
-                else:
-                    logger.warning("Whisper-cli returned empty result")
-                    return None
+            if result and result["text"].strip():
+                logger.info(f"Transcription result: {result['text']}")
+                return result["text"].strip()
             else:
-                logger.error(f"Whisper-cli failed with return code {result.returncode}")
-                logger.error(f"Whisper-cli stderr: {result.stderr}")
+                logger.warning("Whisper returned empty result")
                 return None
     except Exception as e:
         logger.error(f"Error in process_audio_chunk: {e}")
