@@ -40,6 +40,8 @@ MIN_AUDIO_LENGTH = 0.1  # Minimum audio length in seconds (100ms)
 # Initialize whisper model
 try:
     logger.info("Loading Whisper model...")
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
     model = whisper.load_model("base.en")
     logger.info("Whisper model loaded successfully")
 except Exception as e:
