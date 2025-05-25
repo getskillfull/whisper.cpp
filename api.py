@@ -59,18 +59,22 @@ def create_wav_header(sample_rate, channels=1, sample_width=2):
 def process_audio_chunk(chunk_data, session_id):
     """Process an audio chunk and return transcription"""
     try:
+        logger.info("Starting to process audio chunk...")
         # Convert base64 to bytes if needed
         if isinstance(chunk_data, str):
+            logger.info("Converting base64 to bytes...")
             chunk_data = base64.b64decode(chunk_data)
         
         # Create a temporary WAV file
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+            logger.info("Creating temporary WAV file...")
             # Write WAV header
             temp_file.write(create_wav_header(SAMPLE_RATE))
             # Write audio data
             temp_file.write(chunk_data)
             temp_file.flush()
             
+            logger.info(f"Running whisper-cli on {temp_file.name}")
             # Run whisper-cli on the chunk
             result = subprocess.run([
                 '/app/build/bin/whisper-cli',
@@ -82,11 +86,13 @@ def process_audio_chunk(chunk_data, session_id):
             os.unlink(temp_file.name)
             
             if result.returncode == 0:
+                logger.info(f"Whisper-cli successful: {result.stdout.strip()}")
                 return result.stdout.strip()
             else:
+                logger.error(f"Whisper-cli failed: {result.stderr}")
                 return None
     except Exception as e:
-        logger.error(f"Error processing chunk: {e}")
+        logger.error(f"Error in process_audio_chunk: {e}")
         return None
 
 def allowed_file(filename):
@@ -219,16 +225,24 @@ def handle_start_stream(data=None):
 @socketio.on('audio_chunk')
 def handle_audio_chunk(data):
     session_id = request.sid
+    logger.info(f"Received audio chunk from session {session_id}")
+    
     if session_id not in stream_buffers:
+        logger.error(f"Stream not initialized for session {session_id}")
         emit('error', {'message': 'Stream not initialized'})
         return
     
     try:
         # Process the chunk and get transcription
+        logger.info("Processing audio chunk...")
         transcription = process_audio_chunk(data['chunk'], session_id)
         if transcription:
+            logger.info(f"Transcription result: {transcription}")
             emit('partial_result', {'text': transcription})
+        else:
+            logger.warning("No transcription result received")
     except Exception as e:
+        logger.error(f"Error processing chunk: {str(e)}")
         emit('error', {'message': f'Error processing chunk: {str(e)}'})
 
 @socketio.on('end_stream')

@@ -103,6 +103,7 @@
 
         // Connect to WebSocket server
         function connectSocket() {
+            console.log('Connecting to WebSocket server...');
             socket = io('http://localhost:5000', {
                 transports: ['websocket'],
                 reconnection: true,
@@ -110,12 +111,14 @@
             });
 
             socket.on('connect', () => {
+                console.log('Connected to server');
                 connectionStatus.textContent = 'Connected';
                 connectionStatus.className = 'status connected';
                 errorDiv.textContent = '';
             });
 
             socket.on('disconnect', () => {
+                console.log('Disconnected from server');
                 connectionStatus.textContent = 'Disconnected';
                 connectionStatus.className = 'status disconnected';
                 if (isRecording) {
@@ -124,44 +127,66 @@
             });
 
             socket.on('partial_result', (data) => {
+                console.log('Received partial result:', data);
                 transcriptionDiv.textContent = data.text;
             });
 
             socket.on('final_result', (data) => {
+                console.log('Received final result:', data);
                 transcriptionDiv.textContent += '\n' + data.text;
             });
 
             socket.on('error', (data) => {
+                console.error('Received error:', data);
                 errorDiv.textContent = `Error: ${data.message}`;
+            });
+
+            socket.on('connect_error', (error) => {
+                console.error('Connection error:', error);
+                errorDiv.textContent = `Connection error: ${error.message}`;
             });
         }
 
         // Start recording
         async function startRecording() {
             try {
+                console.log('Requesting microphone access...');
                 stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                console.log('Microphone access granted');
+                
                 mediaRecorder = new MediaRecorder(stream);
+                console.log('MediaRecorder created');
                 
                 mediaRecorder.ondataavailable = (event) => {
                     if (event.data.size > 0) {
+                        console.log(`Received audio chunk of size: ${event.data.size} bytes`);
                         audioChunks.push(event.data);
                         // Convert audio chunk to base64
                         const reader = new FileReader();
                         reader.onloadend = () => {
                             const base64Audio = reader.result.split(',')[1];
+                            console.log('Sending audio chunk to server...');
                             socket.emit('audio_chunk', { chunk: base64Audio });
                         };
                         reader.readAsDataURL(event.data);
                     }
                 };
 
+                mediaRecorder.onerror = (event) => {
+                    console.error('MediaRecorder error:', event.error);
+                    errorDiv.textContent = `Recording error: ${event.error.message}`;
+                };
+
+                console.log('Starting MediaRecorder...');
                 mediaRecorder.start(1000); // Collect data every second
                 isRecording = true;
                 startButton.disabled = true;
                 stopButton.disabled = false;
                 transcriptionDiv.textContent = 'Recording started...';
-                socket.emit('start_stream', {});  // Send empty object
+                console.log('Emitting start_stream event...');
+                socket.emit('start_stream', {});
             } catch (err) {
+                console.error('Error in startRecording:', err);
                 errorDiv.textContent = `Error accessing microphone: ${err.message}`;
             }
         }
@@ -169,12 +194,14 @@
         // Stop recording
         function stopRecording() {
             if (mediaRecorder && isRecording) {
+                console.log('Stopping recording...');
                 mediaRecorder.stop();
                 stream.getTracks().forEach(track => track.stop());
                 isRecording = false;
                 startButton.disabled = false;
                 stopButton.disabled = true;
-                socket.emit('end_stream', {});  // Send empty object
+                console.log('Emitting end_stream event...');
+                socket.emit('end_stream', {});
             }
         }
 
