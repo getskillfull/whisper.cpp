@@ -48,7 +48,7 @@ except Exception as e:
     logger.error(f"Failed to load Whisper model: {e}")
     raise
 
-def create_wav_header(sample_rate, channels=1, sample_width=2):
+def create_wav_header(sample_rate, channels=1, sample_width=4):
     """Create a WAV header for the given parameters"""
     header = bytearray()
     # RIFF header
@@ -58,7 +58,7 @@ def create_wav_header(sample_rate, channels=1, sample_width=2):
     # fmt chunk
     header.extend(b'fmt ')
     header.extend((16).to_bytes(4, 'little'))  # fmt chunk size
-    header.extend((1).to_bytes(2, 'little'))   # Audio format (1 for PCM)
+    header.extend((3).to_bytes(2, 'little'))   # Audio format (3 for float32)
     header.extend((channels).to_bytes(2, 'little'))  # Number of channels
     header.extend((sample_rate).to_bytes(4, 'little'))  # Sample rate
     header.extend((sample_rate * channels * sample_width).to_bytes(4, 'little'))  # Byte rate
@@ -69,7 +69,7 @@ def create_wav_header(sample_rate, channels=1, sample_width=2):
     header.extend((0).to_bytes(4, 'little'))  # Data chunk size (to be filled later)
     return header
 
-def pad_audio_with_silence(audio_data, target_length_ms=100):
+def pad_audio_with_silence(audio_data, target_length_ms=1000):
     """Pad audio data with silence to reach target length"""
     current_length_ms = len(audio_data) / SAMPLE_RATE * 1000
     if current_length_ms >= target_length_ms:
@@ -77,7 +77,7 @@ def pad_audio_with_silence(audio_data, target_length_ms=100):
         
     # Calculate number of silence samples needed
     silence_samples = int((target_length_ms - current_length_ms) * SAMPLE_RATE / 1000)
-    silence = np.zeros(silence_samples, dtype=np.int16)
+    silence = np.zeros(silence_samples, dtype=np.float32)
     
     # Combine original audio with silence
     return np.concatenate([audio_data, silence])
@@ -91,18 +91,30 @@ def process_audio_chunk(chunk_data, session_id):
             logger.info("Converting base64 to bytes...")
             chunk_data = base64.b64decode(chunk_data)
         
-        # Convert bytes to numpy array
+        # Convert bytes to numpy array and ensure proper size
         audio_data = np.frombuffer(chunk_data, dtype=np.int16)
+        
+        # Ensure audio data is not empty and has proper length
+        if len(audio_data) == 0:
+            logger.warning("Empty audio data received")
+            return None
+            
+        # Ensure audio data length is even (2 bytes per sample)
+        if len(audio_data) % 2 != 0:
+            audio_data = audio_data[:-1]
         
         # Pad audio if too short
         audio_data = pad_audio_with_silence(audio_data)
+        
+        # Normalize audio data
+        audio_data = audio_data.astype(np.float32) / 32768.0
         
         # Create a temporary WAV file
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
             logger.info("Creating temporary WAV file...")
             
             # Calculate sizes
-            data_size = len(audio_data) * 2  # 2 bytes per sample
+            data_size = len(audio_data) * 4  # 4 bytes per sample (float32)
             file_size = data_size + 44  # 44 is the size of the WAV header
             
             # Write WAV header
@@ -118,8 +130,15 @@ def process_audio_chunk(chunk_data, session_id):
             temp_file.flush()
             
             logger.info(f"Running whisper on {temp_file.name}")
-            # Run whisper on the chunk
-            result = model.transcribe(temp_file.name, language="en")
+            # Run whisper on the chunk with specific parameters
+            result = model.transcribe(
+                temp_file.name,
+                language="en",
+                fp16=False,  # Force FP32 since we're on CPU
+                temperature=0.0,  # Reduce randomness
+                best_of=1,  # Reduce computation
+                beam_size=1  # Reduce computation
+            )
             
             # Clean up
             os.unlink(temp_file.name)
