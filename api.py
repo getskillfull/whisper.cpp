@@ -80,7 +80,9 @@ def process_audio_chunk(chunk_data, session_id):
                 '/app/build/bin/whisper-cli',
                 '-m', '/app/models/ggml-base.en.bin',
                 '-f', temp_file.name,
-                '--verbose', 'true'
+                '--print-progress',
+                '--no-timestamps',
+                '--language', 'en'
             ], capture_output=True, text=True)
             
             # Clean up
