@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Whisper Real-time Transcription</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .controls {
+            margin-bottom: 20px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+            font-size: 16px;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        button.stop {
+            background-color: #f44336;
+        }
+        .status {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .status.connected {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+        }
+        .status.disconnected {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+        .transcription {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            min-height: 100px;
+            white-space: pre-wrap;
+        }
+        .error {
+            color: #c62828;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Whisper Real-time Transcription</h1>
+        
+        <div class="status disconnected" id="connectionStatus">
+            Disconnected
+        </div>
+
+        <div class="controls">
+            <button id="startButton">Start Recording</button>
+            <button id="stopButton" class="stop" disabled>Stop Recording</button>
+        </div>
+
+        <div class="transcription" id="transcription">
+            Transcription will appear here...
+        </div>
+
+        <div class="error" id="error"></div>
+    </div>
+
+    <script>
+        // Initialize variables
+        let socket;
+        let mediaRecorder;
+        let audioChunks = [];
+        let isRecording = false;
+        let stream;
+
+        // DOM elements
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const transcriptionDiv = document.getElementById('transcription');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const errorDiv = document.getElementById('error');
+
+        // Connect to WebSocket server
+        function connectSocket() {
+            socket = io('http://localhost:5000', {
+                transports: ['websocket'],
+                reconnection: true,
+                reconnectionAttempts: 5
+            });
+
+            socket.on('connect', () => {
+                connectionStatus.textContent = 'Connected';
+                connectionStatus.className = 'status connected';
+                errorDiv.textContent = '';
+            });
+
+            socket.on('disconnect', () => {
+                connectionStatus.textContent = 'Disconnected';
+                connectionStatus.className = 'status disconnected';
+                if (isRecording) {
+                    stopRecording();
+                }
+            });
+
+            socket.on('partial_result', (data) => {
+                transcriptionDiv.textContent = data.text;
+            });
+
+            socket.on('final_result', (data) => {
+                transcriptionDiv.textContent += '\n' + data.text;
+            });
+
+            socket.on('error', (data) => {
+                errorDiv.textContent = `Error: ${data.message}`;
+            });
+        }
+
+        // Start recording
+        async function startRecording() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        audioChunks.push(event.data);
+                        // Convert audio chunk to base64
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                            const base64Audio = reader.result.split(',')[1];
+                            socket.emit('audio_chunk', { chunk: base64Audio });
+                        };
+                        reader.readAsDataURL(event.data);
+                    }
+                };
+
+                mediaRecorder.start(1000); // Collect data every second
+                isRecording = true;
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                transcriptionDiv.textContent = 'Recording started...';
+                socket.emit('start_stream', {});  // Send empty object
+            } catch (err) {
+                errorDiv.textContent = `Error accessing microphone: ${err.message}`;
+            }
+        }
+
+        // Stop recording
+        function stopRecording() {
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+                stream.getTracks().forEach(track => track.stop());
+                isRecording = false;
+                startButton.disabled = false;
+                stopButton.disabled = true;
+                socket.emit('end_stream', {});  // Send empty object
+            }
+        }
+
+        // Event listeners
+        startButton.addEventListener('click', startRecording);
+        stopButton.addEventListener('click', stopRecording);
+
+        // Initialize socket connection
+        connectSocket();
+    </script>
+</body>
+</html> 

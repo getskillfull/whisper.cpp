@@ -212,7 +212,7 @@ def handle_disconnect():
         del stream_locks[session_id]
 
 @socketio.on('start_stream')
-def handle_start_stream(data):
+def handle_start_stream(data=None):
     session_id = request.sid
     emit('stream_started', {'message': 'Stream started successfully'})
 
@@ -232,7 +232,7 @@ def handle_audio_chunk(data):
         emit('error', {'message': f'Error processing chunk: {str(e)}'})
 
 @socketio.on('end_stream')
-def handle_end_stream(data):
+def handle_end_stream(data=None):
     session_id = request.sid
     if session_id in stream_buffers:
         emit('final_result', {'text': 'Stream ended successfully'})
