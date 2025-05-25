@@ -15,13 +15,15 @@ import queue
 import time
 import logging
 import whisper
+import ssl
+from scipy import signal
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=60, ping_interval=25)
 
 # Configure upload folder
 UPLOAD_FOLDER = '/opt/whisper/samples'
@@ -36,11 +38,12 @@ stream_locks = {}
 CHUNK_SIZE = 1024  # Size of audio chunks in bytes
 SAMPLE_RATE = 16000  # Whisper expects 16kHz audio
 MIN_AUDIO_LENGTH = 0.1  # Minimum audio length in seconds (100ms)
+NOISE_FLOOR = 0.02  # Increased noise floor threshold
+MIN_SPEECH_DURATION = 0.3  # Minimum duration of speech to consider (300ms)
 
 # Initialize whisper model
 try:
     logger.info("Loading Whisper model...")
-    import ssl
     ssl._create_default_https_context = ssl._create_unverified_context
     model = whisper.load_model("base.en")
     logger.info("Whisper model loaded successfully")
@@ -87,6 +90,22 @@ def pad_audio_with_silence(audio_data, target_length_ms=1000):
         np.zeros(silence_samples - half_silence, dtype=np.float32)
     ])
 
+def is_silence(audio_data, threshold=NOISE_FLOOR, min_duration=MIN_SPEECH_DURATION):
+    """Check if the audio segment is silence"""
+    # Calculate RMS energy
+    rms = np.sqrt(np.mean(np.square(audio_data)))
+    # Check if energy is below threshold
+    if rms < threshold:
+        return True
+    
+    # Check for minimum speech duration
+    speech_frames = np.where(np.abs(audio_data) > threshold)[0]
+    if len(speech_frames) == 0:
+        return True
+    
+    speech_duration = (speech_frames[-1] - speech_frames[0]) / SAMPLE_RATE
+    return speech_duration < min_duration
+
 def process_audio_chunk(chunk_data, session_id):
     """Process an audio chunk and return transcription"""
     try:
@@ -111,9 +130,19 @@ def process_audio_chunk(chunk_data, session_id):
         # Convert to float32 and normalize
         audio_data = audio_data.astype(np.float32) / 32768.0
         
-        # Apply a simple noise gate
-        noise_floor = 0.01
-        audio_data[np.abs(audio_data) < noise_floor] = 0
+        # Apply noise gate
+        audio_data[np.abs(audio_data) < NOISE_FLOOR] = 0
+        
+        # Check if the audio is silence
+        if is_silence(audio_data):
+            logger.info("Audio chunk is silence")
+            return None
+        
+        # Apply a simple high-pass filter to reduce low-frequency noise
+        nyquist = SAMPLE_RATE / 2
+        cutoff = 100  # Hz
+        b, a = signal.butter(4, cutoff/nyquist, btype='high')
+        audio_data = signal.filtfilt(b, a, audio_data)
         
         # Pad audio if too short
         audio_data = pad_audio_with_silence(audio_data)
@@ -148,7 +177,9 @@ def process_audio_chunk(chunk_data, session_id):
                 best_of=1,  # Reduce computation
                 beam_size=1,  # Reduce computation
                 condition_on_previous_text=False,  # Don't use previous context
-                no_speech_threshold=0.6  # More lenient no-speech detection
+                no_speech_threshold=0.6,  # More lenient no-speech detection
+                logprob_threshold=-1.0,  # More lenient log probability threshold
+                compression_ratio_threshold=2.4  # More lenient compression ratio
             )
             
             # Clean up
@@ -163,6 +194,11 @@ def process_audio_chunk(chunk_data, session_id):
                     if i == 0 or word != words[i-1]:
                         cleaned_words.append(word)
                 cleaned_text = " ".join(cleaned_words)
+                
+                # Check if the text is just repeated words
+                if len(set(cleaned_words)) <= 2:
+                    logger.warning("Text appears to be just repeated words")
+                    return None
                 
                 logger.info(f"Transcription result: {cleaned_text}")
                 return cleaned_text
@@ -285,11 +321,13 @@ def handle_connect():
     session_id = request.sid
     stream_buffers[session_id] = queue.Queue()
     stream_locks[session_id] = Lock()
+    logger.info(f"Client connected: {session_id}")
     emit('message', {'data': 'Connected to Whisper WebSocket server.'})
 
 @socketio.on('disconnect')
 def handle_disconnect():
     session_id = request.sid
+    logger.info(f"Client disconnected: {session_id}")
     if session_id in stream_buffers:
         del stream_buffers[session_id]
     if session_id in stream_locks:
@@ -298,6 +336,7 @@ def handle_disconnect():
 @socketio.on('start_stream')
 def handle_start_stream(data=None):
     session_id = request.sid
+    logger.info(f"Stream started for session: {session_id}")
     emit('stream_started', {'message': 'Stream started successfully'})
 
 @socketio.on('audio_chunk')
@@ -326,13 +365,14 @@ def handle_audio_chunk(data):
 @socketio.on('end_stream')
 def handle_end_stream(data=None):
     session_id = request.sid
+    logger.info(f"Stream ended for session: {session_id}")
     if session_id in stream_buffers:
         emit('final_result', {'text': 'Stream ended successfully'})
 
 if __name__ == '__main__':
     try:
         logger.info("Starting Flask application...")
-        socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+        socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False)
     except Exception as e:
         logger.error(f"Error starting Flask application: {e}")
         raise 
