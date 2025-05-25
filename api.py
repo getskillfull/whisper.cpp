@@ -75,21 +75,28 @@ def process_audio_chunk(chunk_data, session_id):
             temp_file.flush()
             
             logger.info(f"Running whisper-cli on {temp_file.name}")
-            # Run whisper-cli on the chunk
+            # Run whisper-cli on the chunk with more verbose output
             result = subprocess.run([
                 '/app/build/bin/whisper-cli',
                 '-m', '/app/models/ggml-base.en.bin',
-                '-f', temp_file.name
+                '-f', temp_file.name,
+                '--verbose', 'true'
             ], capture_output=True, text=True)
             
             # Clean up
             os.unlink(temp_file.name)
             
             if result.returncode == 0:
-                logger.info(f"Whisper-cli successful: {result.stdout.strip()}")
-                return result.stdout.strip()
+                logger.info(f"Whisper-cli stdout: {result.stdout}")
+                logger.info(f"Whisper-cli stderr: {result.stderr}")
+                if result.stdout.strip():
+                    return result.stdout.strip()
+                else:
+                    logger.warning("Whisper-cli returned empty result")
+                    return None
             else:
-                logger.error(f"Whisper-cli failed: {result.stderr}")
+                logger.error(f"Whisper-cli failed with return code {result.returncode}")
+                logger.error(f"Whisper-cli stderr: {result.stderr}")
                 return None
     except Exception as e:
         logger.error(f"Error in process_audio_chunk: {e}")

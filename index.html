@@ -151,10 +151,19 @@
         async function startRecording() {
             try {
                 console.log('Requesting microphone access...');
-                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: 16000,
+                        sampleSize: 16
+                    }
+                });
                 console.log('Microphone access granted');
                 
-                mediaRecorder = new MediaRecorder(stream);
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: 'audio/webm;codecs=opus',
+                    audioBitsPerSecond: 16000
+                });
                 console.log('MediaRecorder created');
                 
                 mediaRecorder.ondataavailable = (event) => {
@@ -178,7 +187,7 @@
                 };
 
                 console.log('Starting MediaRecorder...');
-                mediaRecorder.start(1000); // Collect data every second
+                mediaRecorder.start(3000); // Collect data every 3 seconds
                 isRecording = true;
                 startButton.disabled = true;
                 stopButton.disabled = false;
