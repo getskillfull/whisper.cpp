@@ -32,7 +32,6 @@ WORKDIR /app
 
 # Copy application files
 COPY api.py /app/
-COPY requirements.txt /app/
 
 # Expose port
 EXPOSE 5000
