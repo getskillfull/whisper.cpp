@@ -40,7 +40,7 @@ def create_wav_header(sample_rate, channels=1, sample_width=2):
     header = bytearray()
     # RIFF header
     header.extend(b'RIFF')
-    header.extend((0).to_bytes(4, 'little'))  # File size - 8
+    header.extend((0).to_bytes(4, 'little'))  # File size - 8 (to be filled later)
     header.extend(b'WAVE')
     # fmt chunk
     header.extend(b'fmt ')
@@ -53,7 +53,7 @@ def create_wav_header(sample_rate, channels=1, sample_width=2):
     header.extend((sample_width * 8).to_bytes(2, 'little'))  # Bits per sample
     # data chunk
     header.extend(b'data')
-    header.extend((0).to_bytes(4, 'little'))  # Data chunk size
+    header.extend((0).to_bytes(4, 'little'))  # Data chunk size (to be filled later)
     return header
 
 def process_audio_chunk(chunk_data, session_id):
@@ -68,14 +68,25 @@ def process_audio_chunk(chunk_data, session_id):
         # Create a temporary WAV file
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
             logger.info("Creating temporary WAV file...")
+            
+            # Calculate sizes
+            data_size = len(chunk_data)
+            file_size = data_size + 44  # 44 is the size of the WAV header
+            
             # Write WAV header
-            temp_file.write(create_wav_header(SAMPLE_RATE))
-            # Write audio data
+            header = create_wav_header(SAMPLE_RATE)
+            # Update file size in header
+            header[4:8] = (file_size - 8).to_bytes(4, 'little')
+            # Update data chunk size in header
+            header[40:44] = data_size.to_bytes(4, 'little')
+            
+            # Write header and audio data
+            temp_file.write(header)
             temp_file.write(chunk_data)
             temp_file.flush()
             
             logger.info(f"Running whisper-cli on {temp_file.name}")
-            # Run whisper-cli on the chunk with more verbose output
+            # Run whisper-cli on the chunk
             result = subprocess.run([
                 '/app/build/bin/whisper-cli',
                 '-m', '/app/models/ggml-base.en.bin',
