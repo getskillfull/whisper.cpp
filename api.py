@@ -38,8 +38,12 @@ stream_locks = {}
 CHUNK_SIZE = 1024  # Size of audio chunks in bytes
 SAMPLE_RATE = 16000  # Whisper expects 16kHz audio
 MIN_AUDIO_LENGTH = 0.1  # Minimum audio length in seconds (100ms)
-NOISE_FLOOR = 0.01  # Lowered noise floor threshold
-MIN_SPEECH_DURATION = 0.2  # Reduced minimum speech duration (200ms)
+NOISE_FLOOR = 0.01  # Noise floor threshold
+MIN_SPEECH_DURATION = 0.15  # Reduced minimum speech duration (150ms)
+MAX_BUFFER_DURATION = 1.0  # Maximum duration to buffer (1 second)
+
+# Buffer for each session
+audio_buffers = {}
 
 # Initialize whisper model
 try:
@@ -89,6 +93,25 @@ def pad_audio_with_silence(audio_data, target_length_ms=1000):
         audio_data,
         np.zeros(silence_samples - half_silence, dtype=np.float32)
     ])
+
+def buffer_audio_chunk(session_id, audio_data):
+    """Buffer audio chunks and return combined audio if enough data"""
+    if session_id not in audio_buffers:
+        audio_buffers[session_id] = []
+    
+    audio_buffers[session_id].append(audio_data)
+    
+    # Calculate total duration of buffered audio
+    total_samples = sum(len(chunk) for chunk in audio_buffers[session_id])
+    total_duration = total_samples / SAMPLE_RATE
+    
+    # If we have enough audio, combine and return it
+    if total_duration >= MAX_BUFFER_DURATION:
+        combined_audio = np.concatenate(audio_buffers[session_id])
+        audio_buffers[session_id] = []  # Clear buffer
+        return combined_audio
+    
+    return None
 
 def is_silence(audio_data, threshold=NOISE_FLOOR, min_duration=MIN_SPEECH_DURATION):
     """Check if the audio segment is silence"""
@@ -147,28 +170,30 @@ def process_audio_chunk(chunk_data, session_id):
         audio_data[np.abs(audio_data) < NOISE_FLOOR] = 0
         logger.info(f"Non-zero samples after noise gate: {np.count_nonzero(audio_data)}")
         
-        # Check if the audio is silence
-        if is_silence(audio_data):
-            logger.info("Audio chunk is silence")
+        # Buffer the audio chunk
+        combined_audio = buffer_audio_chunk(session_id, audio_data)
+        if combined_audio is None:
+            logger.info("Buffering audio chunk")
+            return None
+        
+        # Check if the combined audio is silence
+        if is_silence(combined_audio):
+            logger.info("Combined audio is silence")
             return None
         
         # Apply a simple high-pass filter to reduce low-frequency noise
         nyquist = SAMPLE_RATE / 2
         cutoff = 100  # Hz
         b, a = signal.butter(4, cutoff/nyquist, btype='high')
-        audio_data = signal.filtfilt(b, a, audio_data)
+        combined_audio = signal.filtfilt(b, a, combined_audio)
         logger.info("Applied high-pass filter")
-        
-        # Pad audio if too short
-        audio_data = pad_audio_with_silence(audio_data)
-        logger.info(f"Padded audio length: {len(audio_data)} samples")
         
         # Create a temporary WAV file
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
             logger.info("Creating temporary WAV file...")
             
             # Calculate sizes
-            data_size = len(audio_data) * 4  # 4 bytes per sample (float32)
+            data_size = len(combined_audio) * 4  # 4 bytes per sample (float32)
             file_size = data_size + 44  # 44 is the size of the WAV header
             
             # Write WAV header
@@ -180,7 +205,7 @@ def process_audio_chunk(chunk_data, session_id):
             
             # Write header and audio data
             temp_file.write(header)
-            temp_file.write(audio_data.tobytes())
+            temp_file.write(combined_audio.tobytes())
             temp_file.flush()
             
             logger.info(f"Running whisper on {temp_file.name}")
@@ -348,6 +373,8 @@ def handle_disconnect():
         del stream_buffers[session_id]
     if session_id in stream_locks:
         del stream_locks[session_id]
+    if session_id in audio_buffers:
+        del audio_buffers[session_id]
 
 @socketio.on('start_stream')
 def handle_start_stream(data=None):
