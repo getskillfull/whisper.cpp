@@ -79,8 +79,13 @@ def pad_audio_with_silence(audio_data, target_length_ms=1000):
     silence_samples = int((target_length_ms - current_length_ms) * SAMPLE_RATE / 1000)
     silence = np.zeros(silence_samples, dtype=np.float32)
     
-    # Combine original audio with silence
-    return np.concatenate([audio_data, silence])
+    # Add silence to both ends for better context
+    half_silence = silence_samples // 2
+    return np.concatenate([
+        np.zeros(half_silence, dtype=np.float32),
+        audio_data,
+        np.zeros(silence_samples - half_silence, dtype=np.float32)
+    ])
 
 def process_audio_chunk(chunk_data, session_id):
     """Process an audio chunk and return transcription"""
@@ -91,23 +96,27 @@ def process_audio_chunk(chunk_data, session_id):
             logger.info("Converting base64 to bytes...")
             chunk_data = base64.b64decode(chunk_data)
         
-        # Convert bytes to numpy array and ensure proper size
+        # Ensure chunk_data length is even
+        if len(chunk_data) % 2 != 0:
+            chunk_data = chunk_data[:-1]
+        
+        # Convert bytes to numpy array
         audio_data = np.frombuffer(chunk_data, dtype=np.int16)
         
-        # Ensure audio data is not empty and has proper length
+        # Ensure audio data is not empty
         if len(audio_data) == 0:
             logger.warning("Empty audio data received")
             return None
-            
-        # Ensure audio data length is even (2 bytes per sample)
-        if len(audio_data) % 2 != 0:
-            audio_data = audio_data[:-1]
+        
+        # Convert to float32 and normalize
+        audio_data = audio_data.astype(np.float32) / 32768.0
+        
+        # Apply a simple noise gate
+        noise_floor = 0.01
+        audio_data[np.abs(audio_data) < noise_floor] = 0
         
         # Pad audio if too short
         audio_data = pad_audio_with_silence(audio_data)
-        
-        # Normalize audio data
-        audio_data = audio_data.astype(np.float32) / 32768.0
         
         # Create a temporary WAV file
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
@@ -137,15 +146,26 @@ def process_audio_chunk(chunk_data, session_id):
                 fp16=False,  # Force FP32 since we're on CPU
                 temperature=0.0,  # Reduce randomness
                 best_of=1,  # Reduce computation
-                beam_size=1  # Reduce computation
+                beam_size=1,  # Reduce computation
+                condition_on_previous_text=False,  # Don't use previous context
+                no_speech_threshold=0.6  # More lenient no-speech detection
             )
             
             # Clean up
             os.unlink(temp_file.name)
             
             if result and result["text"].strip():
-                logger.info(f"Transcription result: {result['text']}")
-                return result["text"].strip()
+                text = result["text"].strip()
+                # Remove repeated words
+                words = text.split()
+                cleaned_words = []
+                for i, word in enumerate(words):
+                    if i == 0 or word != words[i-1]:
+                        cleaned_words.append(word)
+                cleaned_text = " ".join(cleaned_words)
+                
+                logger.info(f"Transcription result: {cleaned_text}")
+                return cleaned_text
             else:
                 logger.warning("Whisper returned empty result")
                 return None
