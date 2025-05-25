@@ -38,8 +38,8 @@ stream_locks = {}
 CHUNK_SIZE = 1024  # Size of audio chunks in bytes
 SAMPLE_RATE = 16000  # Whisper expects 16kHz audio
 MIN_AUDIO_LENGTH = 0.1  # Minimum audio length in seconds (100ms)
-NOISE_FLOOR = 0.02  # Increased noise floor threshold
-MIN_SPEECH_DURATION = 0.3  # Minimum duration of speech to consider (300ms)
+NOISE_FLOOR = 0.01  # Lowered noise floor threshold
+MIN_SPEECH_DURATION = 0.2  # Reduced minimum speech duration (200ms)
 
 # Initialize whisper model
 try:
@@ -94,17 +94,26 @@ def is_silence(audio_data, threshold=NOISE_FLOOR, min_duration=MIN_SPEECH_DURATI
     """Check if the audio segment is silence"""
     # Calculate RMS energy
     rms = np.sqrt(np.mean(np.square(audio_data)))
+    logger.info(f"Audio RMS energy: {rms:.6f}")
+    
     # Check if energy is below threshold
     if rms < threshold:
+        logger.info(f"Audio energy {rms:.6f} below threshold {threshold}")
         return True
     
     # Check for minimum speech duration
     speech_frames = np.where(np.abs(audio_data) > threshold)[0]
     if len(speech_frames) == 0:
+        logger.info("No speech frames detected")
         return True
     
     speech_duration = (speech_frames[-1] - speech_frames[0]) / SAMPLE_RATE
-    return speech_duration < min_duration
+    logger.info(f"Speech duration: {speech_duration:.3f}s")
+    
+    is_silent = speech_duration < min_duration
+    if is_silent:
+        logger.info(f"Speech duration {speech_duration:.3f}s below minimum {min_duration}s")
+    return is_silent
 
 def process_audio_chunk(chunk_data, session_id):
     """Process an audio chunk and return transcription"""
@@ -114,13 +123,16 @@ def process_audio_chunk(chunk_data, session_id):
         if isinstance(chunk_data, str):
             logger.info("Converting base64 to bytes...")
             chunk_data = base64.b64decode(chunk_data)
+            logger.info(f"Decoded chunk size: {len(chunk_data)} bytes")
         
         # Ensure chunk_data length is even
         if len(chunk_data) % 2 != 0:
             chunk_data = chunk_data[:-1]
+            logger.info("Adjusted chunk size to even length")
         
         # Convert bytes to numpy array
         audio_data = np.frombuffer(chunk_data, dtype=np.int16)
+        logger.info(f"Audio data shape: {audio_data.shape}, dtype: {audio_data.dtype}")
         
         # Ensure audio data is not empty
         if len(audio_data) == 0:
@@ -129,9 +141,11 @@ def process_audio_chunk(chunk_data, session_id):
         
         # Convert to float32 and normalize
         audio_data = audio_data.astype(np.float32) / 32768.0
+        logger.info(f"Audio data range: [{np.min(audio_data):.3f}, {np.max(audio_data):.3f}]")
         
         # Apply noise gate
         audio_data[np.abs(audio_data) < NOISE_FLOOR] = 0
+        logger.info(f"Non-zero samples after noise gate: {np.count_nonzero(audio_data)}")
         
         # Check if the audio is silence
         if is_silence(audio_data):
@@ -143,9 +157,11 @@ def process_audio_chunk(chunk_data, session_id):
         cutoff = 100  # Hz
         b, a = signal.butter(4, cutoff/nyquist, btype='high')
         audio_data = signal.filtfilt(b, a, audio_data)
+        logger.info("Applied high-pass filter")
         
         # Pad audio if too short
         audio_data = pad_audio_with_silence(audio_data)
+        logger.info(f"Padded audio length: {len(audio_data)} samples")
         
         # Create a temporary WAV file
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
