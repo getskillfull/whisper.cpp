@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:22.04 as builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -22,16 +22,31 @@ RUN pip install --no-cache-dir \
     eventlet \
     boto3 \
     numpy \
+    torch --index-url https://download.pytorch.org/whl/cpu \
     openai-whisper
 
 # Create necessary directories
 RUN mkdir -p /opt/whisper/samples
 
-# Set working directory
-WORKDIR /app
+# Final stage
+FROM ubuntu:22.04
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    python3 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy application files
+WORKDIR /app
 COPY api.py /app/
+
+# Create necessary directories
+RUN mkdir -p /opt/whisper/samples
 
 # Expose port
 EXPOSE 5000
