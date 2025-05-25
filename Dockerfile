@@ -21,9 +21,13 @@ RUN pip install --no-cache-dir \
     flask-socketio \
     eventlet \
     boto3 \
-    numpy \
-    torch --index-url https://download.pytorch.org/whl/cpu \
-    openai-whisper
+    numpy
+
+# Install PyTorch CPU version
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+# Install Whisper
+RUN pip install --no-cache-dir openai-whisper
 
 # Create necessary directories
 RUN mkdir -p /opt/whisper/samples
