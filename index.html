@@ -31,6 +31,10 @@
             cursor: pointer;
             margin-right: 10px;
             font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
         }
         button:disabled {
             background-color: #cccccc;
@@ -39,10 +43,16 @@
         button.stop {
             background-color: #f44336;
         }
+        button.stop:hover {
+            background-color: #da190b;
+        }
         .status {
             margin: 10px 0;
             padding: 10px;
             border-radius: 4px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
         .status.connected {
             background-color: #e8f5e9;
@@ -52,17 +62,51 @@
             background-color: #ffebee;
             color: #c62828;
         }
-        .transcription {
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .status.connected .status-indicator {
+            background-color: #2e7d32;
+        }
+        .status.disconnected .status-indicator {
+            background-color: #c62828;
+        }
+        .transcription-container {
             margin-top: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .transcription {
             padding: 15px;
             background-color: #f8f9fa;
             border-radius: 4px;
             min-height: 100px;
             white-space: pre-wrap;
+            line-height: 1.5;
+        }
+        .current-word {
+            font-weight: bold;
+            color: #4CAF50;
+            animation: fadeIn 0.3s ease-in;
         }
         .error {
             color: #c62828;
             margin-top: 10px;
+            padding: 10px;
+            background-color: #ffebee;
+            border-radius: 4px;
+            display: none;
+        }
+        .error.show {
+            display: block;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
         }
     </style>
 </head>
@@ -71,7 +115,8 @@
         <h1>Whisper Real-time Transcription</h1>
         
         <div class="status disconnected" id="connectionStatus">
-            Disconnected
+            <span class="status-indicator"></span>
+            <span>Disconnected</span>
         </div>
 
         <div class="controls">
@@ -79,8 +124,11 @@
             <button id="stopButton" class="stop" disabled>Stop Recording</button>
         </div>
 
-        <div class="transcription" id="transcription">
-            Transcription will appear here...
+        <div class="transcription-container">
+            <div class="transcription" id="transcription">
+                Transcription will appear here...
+            </div>
+            <div class="transcription" id="currentWord"></div>
         </div>
 
         <div class="error" id="error"></div>
@@ -93,11 +141,13 @@
         let audioChunks = [];
         let isRecording = false;
         let stream;
+        let currentTranscription = '';
 
         // DOM elements
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
         const transcriptionDiv = document.getElementById('transcription');
+        const currentWordDiv = document.getElementById('currentWord');
         const connectionStatus = document.getElementById('connectionStatus');
         const errorDiv = document.getElementById('error');
 
@@ -112,38 +162,49 @@
 
             socket.on('connect', () => {
                 console.log('Connected to server');
-                connectionStatus.textContent = 'Connected';
+                connectionStatus.innerHTML = '<span class="status-indicator"></span><span>Connected</span>';
                 connectionStatus.className = 'status connected';
                 errorDiv.textContent = '';
+                errorDiv.classList.remove('show');
             });
 
             socket.on('disconnect', () => {
                 console.log('Disconnected from server');
-                connectionStatus.textContent = 'Disconnected';
+                connectionStatus.innerHTML = '<span class="status-indicator"></span><span>Disconnected</span>';
                 connectionStatus.className = 'status disconnected';
                 if (isRecording) {
                     stopRecording();
                 }
             });
 
+            socket.on('word', (data) => {
+                console.log('Received word:', data);
+                currentWordDiv.innerHTML = `<span class="current-word">${data.text}</span>`;
+                currentTranscription += data.text + ' ';
+                transcriptionDiv.textContent = currentTranscription;
+            });
+
             socket.on('partial_result', (data) => {
                 console.log('Received partial result:', data);
-                transcriptionDiv.textContent = data.text;
+                // Keep the current transcription as is, since we're already showing words
             });
 
             socket.on('final_result', (data) => {
                 console.log('Received final result:', data);
-                transcriptionDiv.textContent += '\n' + data.text;
+                currentWordDiv.textContent = '';
+                // Don't append to current transcription as we're already showing all words
             });
 
             socket.on('error', (data) => {
                 console.error('Received error:', data);
                 errorDiv.textContent = `Error: ${data.message}`;
+                errorDiv.classList.add('show');
             });
 
             socket.on('connect_error', (error) => {
                 console.error('Connection error:', error);
                 errorDiv.textContent = `Connection error: ${error.message}`;
+                errorDiv.classList.add('show');
             });
         }
 
@@ -184,19 +245,23 @@
                 mediaRecorder.onerror = (event) => {
                     console.error('MediaRecorder error:', event.error);
                     errorDiv.textContent = `Recording error: ${event.error.message}`;
+                    errorDiv.classList.add('show');
                 };
 
                 console.log('Starting MediaRecorder...');
-                mediaRecorder.start(3000); // Collect data every 3 seconds
+                mediaRecorder.start(1000); // Collect data every second for more frequent updates
                 isRecording = true;
                 startButton.disabled = true;
                 stopButton.disabled = false;
+                currentTranscription = '';
                 transcriptionDiv.textContent = 'Recording started...';
+                currentWordDiv.textContent = '';
                 console.log('Emitting start_stream event...');
                 socket.emit('start_stream', {});
             } catch (err) {
                 console.error('Error in startRecording:', err);
                 errorDiv.textContent = `Error accessing microphone: ${err.message}`;
+                errorDiv.classList.add('show');
             }
         }
 

@@ -38,11 +38,11 @@ stream_locks = {}
 CHUNK_SIZE = 1024  # Size of audio chunks in bytes
 SAMPLE_RATE = 16000  # Whisper expects 16kHz audio
 MIN_AUDIO_LENGTH = 0.1  # Minimum audio length in seconds (100ms)
-NOISE_FLOOR = 0.01  # Noise floor threshold
-MIN_SPEECH_DURATION = 0.15  # Reduced minimum speech duration (150ms)
-MAX_BUFFER_DURATION = 1.0  # Maximum duration to buffer (1 second)
-MIN_BUFFER_DURATION = 0.3  # Minimum duration to process (300ms)
-BUFFER_TIMEOUT = 0.5  # Timeout for processing partial buffers (500ms)
+NOISE_FLOOR = 0.005  # Lowered noise floor threshold
+MIN_SPEECH_DURATION = 0.1  # Reduced minimum speech duration (100ms)
+MAX_BUFFER_DURATION = 0.8  # Reduced maximum duration to buffer (800ms)
+MIN_BUFFER_DURATION = 0.2  # Reduced minimum duration to process (200ms)
+BUFFER_TIMEOUT = 0.3  # Reduced timeout for processing partial buffers (300ms)
 
 # Buffer for each session
 audio_buffers = {}
@@ -110,9 +110,11 @@ def buffer_audio_chunk(session_id, audio_data):
     # Calculate total duration of buffered audio
     total_samples = sum(len(chunk) for chunk in audio_buffers[session_id])
     total_duration = total_samples / SAMPLE_RATE
+    logger.info(f"Total buffered duration: {total_duration:.3f}s")
     
     # If we have enough audio, combine and return it
     if total_duration >= MAX_BUFFER_DURATION:
+        logger.info(f"Buffer full ({total_duration:.3f}s), processing...")
         combined_audio = np.concatenate(audio_buffers[session_id])
         audio_buffers[session_id] = []  # Clear buffer
         last_buffer_time[session_id] = current_time
@@ -120,11 +122,13 @@ def buffer_audio_chunk(session_id, audio_data):
     
     # If we have minimum duration and enough time has passed, process anyway
     if total_duration >= MIN_BUFFER_DURATION and (current_time - last_buffer_time[session_id]) >= BUFFER_TIMEOUT:
+        logger.info(f"Buffer timeout reached ({total_duration:.3f}s), processing...")
         combined_audio = np.concatenate(audio_buffers[session_id])
         audio_buffers[session_id] = []  # Clear buffer
         last_buffer_time[session_id] = current_time
         return combined_audio
     
+    logger.info(f"Buffering audio chunk, current duration: {total_duration:.3f}s")
     return None
 
 def is_silence(audio_data, threshold=NOISE_FLOOR, min_duration=MIN_SPEECH_DURATION):
@@ -144,8 +148,10 @@ def is_silence(audio_data, threshold=NOISE_FLOOR, min_duration=MIN_SPEECH_DURATI
         logger.info("No speech frames detected")
         return True
     
-    speech_duration = (speech_frames[-1] - speech_frames[0]) / SAMPLE_RATE
-    logger.info(f"Speech duration: {speech_duration:.3f}s")
+    # Calculate speech duration using non-zero samples
+    non_zero_samples = np.count_nonzero(audio_data)
+    speech_duration = non_zero_samples / SAMPLE_RATE
+    logger.info(f"Speech duration: {speech_duration:.3f}s (non-zero samples: {non_zero_samples})")
     
     is_silent = speech_duration < min_duration
     if is_silent:
@@ -169,7 +175,14 @@ def process_buffered_audio(session_id):
     
     return None
 
-def process_audio_data(audio_data):
+def emit_word(session_id, word):
+    """Emit a single word to the client"""
+    try:
+        socketio.emit('word', {'text': word}, room=session_id)
+    except Exception as e:
+        logger.error(f"Error emitting word: {e}")
+
+def process_audio_data(audio_data, session_id):
     """Process audio data and return transcription"""
     try:
         # Check if the audio is silence
@@ -214,7 +227,7 @@ def process_audio_data(audio_data):
                 best_of=1,  # Reduce computation
                 beam_size=1,  # Reduce computation
                 condition_on_previous_text=False,  # Don't use previous context
-                no_speech_threshold=0.6,  # More lenient no-speech detection
+                no_speech_threshold=0.5,  # More lenient no-speech detection
                 logprob_threshold=-1.0,  # More lenient log probability threshold
                 compression_ratio_threshold=2.4  # More lenient compression ratio
             )
@@ -224,20 +237,28 @@ def process_audio_data(audio_data):
             
             if result and result["text"].strip():
                 text = result["text"].strip()
+                logger.info(f"Raw transcription: {text}")
+                
                 # Remove repeated words
                 words = text.split()
                 cleaned_words = []
                 for i, word in enumerate(words):
                     if i == 0 or word != words[i-1]:
                         cleaned_words.append(word)
+                        # Emit each word as it's processed
+                        emit_word(session_id, word)
+                
                 cleaned_text = " ".join(cleaned_words)
                 
                 # Check if the text is just repeated words
-                if len(set(cleaned_words)) <= 2:
-                    logger.warning("Text appears to be just repeated words")
+                unique_words = set(cleaned_words)
+                logger.info(f"Unique words: {unique_words}")
+                
+                if len(unique_words) <= 2 and len(cleaned_words) > 3:
+                    logger.warning(f"Text appears to be just repeated words: {cleaned_text}")
                     return None
                 
-                logger.info(f"Transcription result: {cleaned_text}")
+                logger.info(f"Final transcription: {cleaned_text}")
                 return cleaned_text
             else:
                 logger.warning("Whisper returned empty result")
@@ -281,7 +302,7 @@ def process_audio_chunk(chunk_data, session_id):
         # Buffer the audio chunk
         combined_audio = buffer_audio_chunk(session_id, audio_data)
         if combined_audio is not None:
-            return process_audio_data(combined_audio)
+            return process_audio_data(combined_audio, session_id)
         
         logger.info("Buffering audio chunk")
         return None
