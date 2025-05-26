@@ -272,6 +272,8 @@ def process_audio_chunk(chunk_data, session_id):
     """Process an audio chunk and return transcription"""
     try:
         print(f"\n=== Processing new audio chunk for session {session_id} ===")
+        print(f"Chunk data type: {type(chunk_data)}")
+        print(f"Chunk data length: {len(chunk_data) if isinstance(chunk_data, (str, bytes)) else 'unknown'}")
         
         # Ensure chunk_data is a string
         if isinstance(chunk_data, bytes):
@@ -283,7 +285,12 @@ def process_audio_chunk(chunk_data, session_id):
             chunk_data += '=' * (4 - padding)
         
         # Decode base64
-        audio_data = base64.b64decode(chunk_data)
+        try:
+            audio_data = base64.b64decode(chunk_data)
+            print(f"Successfully decoded base64 data, length: {len(audio_data)}")
+        except Exception as e:
+            print(f"Error decoding base64: {str(e)}")
+            return None
         
         # Ensure audio data length is even
         if len(audio_data) % 2 != 0:
@@ -293,6 +300,11 @@ def process_audio_chunk(chunk_data, session_id):
         audio_array = np.frombuffer(audio_data, dtype=np.int16)
         print(f"Audio data shape: {audio_array.shape}, dtype: {audio_array.dtype}")
         print(f"Audio data range: [{np.min(audio_array):.3f}, {np.max(audio_array):.3f}]")
+        
+        # Check if audio is too quiet
+        if np.max(np.abs(audio_array)) < 1000:  # Arbitrary threshold
+            print("Audio is too quiet, skipping")
+            return None
         
         # Convert to float32 and normalize
         audio_float = audio_array.astype(np.float32) / 32768.0
@@ -461,28 +473,18 @@ def health_check():
 @socketio.on('connect')
 def handle_connect():
     session_id = request.sid
-    stream_buffers[session_id] = queue.Queue()
-    stream_locks[session_id] = Lock()
-    logger.info(f"Client connected: {session_id}")
+    print(f"\n=== New client connected: {session_id} ===")
     emit('message', {'data': 'Connected to Whisper WebSocket server.'})
 
 @socketio.on('disconnect')
 def handle_disconnect():
     session_id = request.sid
-    logger.info(f"Client disconnected: {session_id}")
-    if session_id in stream_buffers:
-        del stream_buffers[session_id]
-    if session_id in stream_locks:
-        del stream_locks[session_id]
-    if session_id in audio_buffers:
-        del audio_buffers[session_id]
-    if session_id in last_buffer_time:
-        del last_buffer_time[session_id]
+    print(f"\n=== Client disconnected: {session_id} ===")
 
 @socketio.on('start_stream')
 def handle_start_stream(data=None):
     session_id = request.sid
-    logger.info(f"Stream started for session: {session_id}")
+    print(f"\n=== Stream started for session: {session_id} ===")
     emit('stream_started', {'message': 'Stream started successfully'})
 
 @socketio.on('audio_chunk')
@@ -490,7 +492,13 @@ def handle_audio_chunk(data):
     session_id = request.sid
     print(f"\n=== Received audio chunk from session {session_id} ===")
     
+    if not data or 'chunk' not in data:
+        print("Error: No audio chunk data received")
+        emit('error', {'message': 'No audio chunk data received'})
+        return
+        
     try:
+        print(f"Audio chunk length: {len(data['chunk'])}")
         # Process the chunk directly
         transcription = process_audio_chunk(data['chunk'], session_id)
         if transcription:
@@ -504,13 +512,7 @@ def handle_audio_chunk(data):
 @socketio.on('end_stream')
 def handle_end_stream(data=None):
     session_id = request.sid
-    logger.info(f"Stream ended for session: {session_id}")
-    
-    # Process any remaining audio in the buffer
-    transcription = process_buffered_audio(session_id)
-    if transcription:
-        emit('partial_result', {'text': transcription})
-    
+    print(f"\n=== Stream ended for session: {session_id} ===")
     emit('final_result', {'text': 'Stream ended successfully'})
 
 if __name__ == '__main__':
