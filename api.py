@@ -117,11 +117,24 @@ def buffer_audio_chunk(chunk_data, session_id):
                     chunk_data = chunk_data + ('=' * padding)
                 
                 audio_bytes = base64.b64decode(chunk_data)
+                
+                # Ensure the audio data length is even
+                if len(audio_bytes) % 2 != 0:
+                    audio_bytes = audio_bytes[:-1]
+                
+                # Convert to numpy array
                 audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
                 
-                # Ensure even length
-                if len(audio_data) % 2 != 0:
-                    audio_data = audio_data[:-1]
+                # Log audio data details
+                logger.info(f"Audio data shape: {audio_data.shape}, dtype: {audio_data.dtype}")
+                logger.info(f"Audio data range: [{np.min(audio_data):.3f}, {np.max(audio_data):.3f}]")
+                
+                # Convert to float32 and normalize
+                audio_data = audio_data.astype(np.float32) / 32768.0
+                
+                # Apply noise gate
+                audio_data[np.abs(audio_data) < NOISE_FLOOR] = 0
+                logger.info(f"Non-zero samples after noise gate: {np.count_nonzero(audio_data)}")
                 
                 # Add to buffer
                 audio_buffers[session_id].append(audio_data)
@@ -207,9 +220,6 @@ def emit_word(session_id, word):
 def process_audio_data(audio_data, session_id):
     """Process audio data and return transcription."""
     try:
-        # Convert to float32 and normalize
-        audio_data = audio_data.astype(np.float32) / 32768.0
-        
         # Apply high-pass filter to reduce low-frequency noise
         nyquist = SAMPLE_RATE / 2
         cutoff = 100  # Hz
