@@ -271,24 +271,75 @@ def buffer_audio_chunk(chunk_data, session_id):
 def process_audio_chunk(chunk_data, session_id):
     """Process an audio chunk and return transcription"""
     try:
-        logger.info("Starting to process audio chunk...")
+        print("Processing audio chunk...")
         
         # Ensure chunk_data is a string
-        if not isinstance(chunk_data, str):
+        if isinstance(chunk_data, bytes):
             chunk_data = chunk_data.decode('utf-8')
         
-        logger.info("Converting base64 to bytes...")
+        # Add padding if needed
+        padding = len(chunk_data) % 4
+        if padding:
+            chunk_data += '=' * (4 - padding)
         
-        # Process the audio chunk
-        result = buffer_audio_chunk(chunk_data, session_id)
-        if result:
-            logger.info(f"Transcription result: {result}")
-            emit('partial_result', {'text': result})
+        # Decode base64
+        audio_data = base64.b64decode(chunk_data)
         
-        return result
+        # Ensure audio data length is even
+        if len(audio_data) % 2 != 0:
+            audio_data = audio_data[:-1]
         
+        # Convert to numpy array
+        audio_array = np.frombuffer(audio_data, dtype=np.int16)
+        
+        # Convert to float32 and normalize
+        audio_float = audio_array.astype(np.float32) / 32768.0
+        
+        # Create temporary WAV file
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+            temp_filename = temp_file.name
+            with wave.open(temp_filename, 'wb') as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(SAMPLE_RATE)
+                wav_file.writeframes((audio_float * 32768).astype(np.int16).tobytes())
+        
+        print(f"Running whisper on {temp_filename}")
+        
+        # Run Whisper with lenient parameters
+        result = model.transcribe(
+            temp_filename,
+            language="en",
+            task="transcribe",
+            fp16=False,
+            beam_size=1,
+            best_of=1,
+            temperature=0.0,
+            no_speech_threshold=0.1,  # Very lenient no-speech detection
+            logprob_threshold=-1.0,
+            compression_ratio_threshold=2.4,
+            condition_on_previous_text=True,
+            initial_prompt="Transcribe the following audio:"
+        )
+        
+        # Clean up temporary file
+        os.unlink(temp_filename)
+        
+        if result and result["text"].strip():
+            print(f"Transcription: {result['text']}")
+            # Emit each word
+            words = result["text"].split()
+            for word in words:
+                emit_word(session_id, word)
+            # Emit full transcription
+            socketio.emit('partial_result', {'text': result["text"]}, room=session_id)
+            return result["text"]
+        else:
+            print("No transcription result")
+            return None
+            
     except Exception as e:
-        logger.error(f"Error in process_audio_chunk: {e}")
+        print(f"Error processing chunk: {str(e)}")
         return None
 
 def allowed_file(filename):
@@ -428,24 +479,17 @@ def handle_start_stream(data=None):
 @socketio.on('audio_chunk')
 def handle_audio_chunk(data):
     session_id = request.sid
-    logger.info(f"Received audio chunk from session {session_id}")
-    
-    if session_id not in stream_buffers:
-        logger.error(f"Stream not initialized for session {session_id}")
-        emit('error', {'message': 'Stream not initialized'})
-        return
+    print(f"Received audio chunk from session {session_id}")
     
     try:
-        # Process the chunk and get transcription
-        logger.info("Processing audio chunk...")
+        # Process the chunk directly
         transcription = process_audio_chunk(data['chunk'], session_id)
         if transcription:
-            logger.info(f"Transcription result: {transcription}")
-            emit('partial_result', {'text': transcription})
+            print(f"Transcription result: {transcription}")
         else:
-            logger.warning("No transcription result received")
+            print("No transcription result received")
     except Exception as e:
-        logger.error(f"Error processing chunk: {str(e)}")
+        print(f"Error processing chunk: {str(e)}")
         emit('error', {'message': f'Error processing chunk: {str(e)}'})
 
 @socketio.on('end_stream')
