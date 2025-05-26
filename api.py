@@ -41,9 +41,12 @@ MIN_AUDIO_LENGTH = 0.1  # Minimum audio length in seconds (100ms)
 NOISE_FLOOR = 0.01  # Noise floor threshold
 MIN_SPEECH_DURATION = 0.15  # Reduced minimum speech duration (150ms)
 MAX_BUFFER_DURATION = 1.0  # Maximum duration to buffer (1 second)
+MIN_BUFFER_DURATION = 0.3  # Minimum duration to process (300ms)
+BUFFER_TIMEOUT = 0.5  # Timeout for processing partial buffers (500ms)
 
 # Buffer for each session
 audio_buffers = {}
+last_buffer_time = {}
 
 # Initialize whisper model
 try:
@@ -96,8 +99,11 @@ def pad_audio_with_silence(audio_data, target_length_ms=1000):
 
 def buffer_audio_chunk(session_id, audio_data):
     """Buffer audio chunks and return combined audio if enough data"""
+    current_time = time.time()
+    
     if session_id not in audio_buffers:
         audio_buffers[session_id] = []
+        last_buffer_time[session_id] = current_time
     
     audio_buffers[session_id].append(audio_data)
     
@@ -109,6 +115,14 @@ def buffer_audio_chunk(session_id, audio_data):
     if total_duration >= MAX_BUFFER_DURATION:
         combined_audio = np.concatenate(audio_buffers[session_id])
         audio_buffers[session_id] = []  # Clear buffer
+        last_buffer_time[session_id] = current_time
+        return combined_audio
+    
+    # If we have minimum duration and enough time has passed, process anyway
+    if total_duration >= MIN_BUFFER_DURATION and (current_time - last_buffer_time[session_id]) >= BUFFER_TIMEOUT:
+        combined_audio = np.concatenate(audio_buffers[session_id])
+        audio_buffers[session_id] = []  # Clear buffer
+        last_buffer_time[session_id] = current_time
         return combined_audio
     
     return None
@@ -138,54 +152,36 @@ def is_silence(audio_data, threshold=NOISE_FLOOR, min_duration=MIN_SPEECH_DURATI
         logger.info(f"Speech duration {speech_duration:.3f}s below minimum {min_duration}s")
     return is_silent
 
-def process_audio_chunk(chunk_data, session_id):
-    """Process an audio chunk and return transcription"""
+def process_buffered_audio(session_id):
+    """Process any remaining audio in the buffer"""
+    if session_id not in audio_buffers or not audio_buffers[session_id]:
+        return None
+    
+    # Calculate total duration of buffered audio
+    total_samples = sum(len(chunk) for chunk in audio_buffers[session_id])
+    total_duration = total_samples / SAMPLE_RATE
+    
+    # Only process if we have minimum duration
+    if total_duration >= MIN_BUFFER_DURATION:
+        combined_audio = np.concatenate(audio_buffers[session_id])
+        audio_buffers[session_id] = []  # Clear buffer
+        return process_audio_data(combined_audio)
+    
+    return None
+
+def process_audio_data(audio_data):
+    """Process audio data and return transcription"""
     try:
-        logger.info("Starting to process audio chunk...")
-        # Convert base64 to bytes if needed
-        if isinstance(chunk_data, str):
-            logger.info("Converting base64 to bytes...")
-            chunk_data = base64.b64decode(chunk_data)
-            logger.info(f"Decoded chunk size: {len(chunk_data)} bytes")
-        
-        # Ensure chunk_data length is even
-        if len(chunk_data) % 2 != 0:
-            chunk_data = chunk_data[:-1]
-            logger.info("Adjusted chunk size to even length")
-        
-        # Convert bytes to numpy array
-        audio_data = np.frombuffer(chunk_data, dtype=np.int16)
-        logger.info(f"Audio data shape: {audio_data.shape}, dtype: {audio_data.dtype}")
-        
-        # Ensure audio data is not empty
-        if len(audio_data) == 0:
-            logger.warning("Empty audio data received")
-            return None
-        
-        # Convert to float32 and normalize
-        audio_data = audio_data.astype(np.float32) / 32768.0
-        logger.info(f"Audio data range: [{np.min(audio_data):.3f}, {np.max(audio_data):.3f}]")
-        
-        # Apply noise gate
-        audio_data[np.abs(audio_data) < NOISE_FLOOR] = 0
-        logger.info(f"Non-zero samples after noise gate: {np.count_nonzero(audio_data)}")
-        
-        # Buffer the audio chunk
-        combined_audio = buffer_audio_chunk(session_id, audio_data)
-        if combined_audio is None:
-            logger.info("Buffering audio chunk")
-            return None
-        
-        # Check if the combined audio is silence
-        if is_silence(combined_audio):
-            logger.info("Combined audio is silence")
+        # Check if the audio is silence
+        if is_silence(audio_data):
+            logger.info("Audio is silence")
             return None
         
         # Apply a simple high-pass filter to reduce low-frequency noise
         nyquist = SAMPLE_RATE / 2
         cutoff = 100  # Hz
         b, a = signal.butter(4, cutoff/nyquist, btype='high')
-        combined_audio = signal.filtfilt(b, a, combined_audio)
+        audio_data = signal.filtfilt(b, a, audio_data)
         logger.info("Applied high-pass filter")
         
         # Create a temporary WAV file
@@ -193,7 +189,7 @@ def process_audio_chunk(chunk_data, session_id):
             logger.info("Creating temporary WAV file...")
             
             # Calculate sizes
-            data_size = len(combined_audio) * 4  # 4 bytes per sample (float32)
+            data_size = len(audio_data) * 4  # 4 bytes per sample (float32)
             file_size = data_size + 44  # 44 is the size of the WAV header
             
             # Write WAV header
@@ -205,7 +201,7 @@ def process_audio_chunk(chunk_data, session_id):
             
             # Write header and audio data
             temp_file.write(header)
-            temp_file.write(combined_audio.tobytes())
+            temp_file.write(audio_data.tobytes())
             temp_file.flush()
             
             logger.info(f"Running whisper on {temp_file.name}")
@@ -246,6 +242,49 @@ def process_audio_chunk(chunk_data, session_id):
             else:
                 logger.warning("Whisper returned empty result")
                 return None
+    except Exception as e:
+        logger.error(f"Error in process_audio_data: {e}")
+        return None
+
+def process_audio_chunk(chunk_data, session_id):
+    """Process an audio chunk and return transcription"""
+    try:
+        logger.info("Starting to process audio chunk...")
+        # Convert base64 to bytes if needed
+        if isinstance(chunk_data, str):
+            logger.info("Converting base64 to bytes...")
+            chunk_data = base64.b64decode(chunk_data)
+            logger.info(f"Decoded chunk size: {len(chunk_data)} bytes")
+        
+        # Ensure chunk_data length is even
+        if len(chunk_data) % 2 != 0:
+            chunk_data = chunk_data[:-1]
+            logger.info("Adjusted chunk size to even length")
+        
+        # Convert bytes to numpy array
+        audio_data = np.frombuffer(chunk_data, dtype=np.int16)
+        logger.info(f"Audio data shape: {audio_data.shape}, dtype: {audio_data.dtype}")
+        
+        # Ensure audio data is not empty
+        if len(audio_data) == 0:
+            logger.warning("Empty audio data received")
+            return None
+        
+        # Convert to float32 and normalize
+        audio_data = audio_data.astype(np.float32) / 32768.0
+        logger.info(f"Audio data range: [{np.min(audio_data):.3f}, {np.max(audio_data):.3f}]")
+        
+        # Apply noise gate
+        audio_data[np.abs(audio_data) < NOISE_FLOOR] = 0
+        logger.info(f"Non-zero samples after noise gate: {np.count_nonzero(audio_data)}")
+        
+        # Buffer the audio chunk
+        combined_audio = buffer_audio_chunk(session_id, audio_data)
+        if combined_audio is not None:
+            return process_audio_data(combined_audio)
+        
+        logger.info("Buffering audio chunk")
+        return None
     except Exception as e:
         logger.error(f"Error in process_audio_chunk: {e}")
         return None
@@ -375,6 +414,8 @@ def handle_disconnect():
         del stream_locks[session_id]
     if session_id in audio_buffers:
         del audio_buffers[session_id]
+    if session_id in last_buffer_time:
+        del last_buffer_time[session_id]
 
 @socketio.on('start_stream')
 def handle_start_stream(data=None):
@@ -409,8 +450,13 @@ def handle_audio_chunk(data):
 def handle_end_stream(data=None):
     session_id = request.sid
     logger.info(f"Stream ended for session: {session_id}")
-    if session_id in stream_buffers:
-        emit('final_result', {'text': 'Stream ended successfully'})
+    
+    # Process any remaining audio in the buffer
+    transcription = process_buffered_audio(session_id)
+    if transcription:
+        emit('partial_result', {'text': transcription})
+    
+    emit('final_result', {'text': 'Stream ended successfully'})
 
 if __name__ == '__main__':
     try:
