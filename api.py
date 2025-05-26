@@ -44,8 +44,8 @@ SAMPLE_RATE = 16000
 MIN_AUDIO_LENGTH = 0.1  # Minimum audio length in seconds
 NOISE_FLOOR = 0.001  # Reduced noise floor for more lenient detection
 MIN_SPEECH_DURATION = 0.05  # Reduced minimum speech duration
-MAX_BUFFER_DURATION = 0.5  # Increased buffer duration for better context
-MIN_BUFFER_DURATION = 0.2  # Minimum buffer duration
+MAX_BUFFER_DURATION = 1.0  # Increased buffer duration for better context
+MIN_BUFFER_DURATION = 0.5  # Increased minimum buffer duration
 BUFFER_TIMEOUT = 0.3  # Buffer timeout
 
 # Buffer for each session
@@ -172,7 +172,7 @@ def process_audio_data(audio_data, session_id):
             beam_size=1,  # Reduced for faster processing
             best_of=1,    # Reduced for faster processing
             temperature=0.0,  # Deterministic output
-            no_speech_threshold=0.3,  # More lenient no-speech detection
+            no_speech_threshold=0.2,  # Even more lenient no-speech detection
             logprob_threshold=-1.0,   # More lenient log probability threshold
             compression_ratio_threshold=2.4,  # More lenient compression ratio
             condition_on_previous_text=True,  # Use previous context
