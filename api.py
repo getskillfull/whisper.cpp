@@ -271,7 +271,7 @@ def buffer_audio_chunk(chunk_data, session_id):
 def process_audio_chunk(chunk_data, session_id):
     """Process an audio chunk and return transcription"""
     try:
-        print("Processing audio chunk...")
+        print(f"\n=== Processing new audio chunk for session {session_id} ===")
         
         # Ensure chunk_data is a string
         if isinstance(chunk_data, bytes):
@@ -291,6 +291,8 @@ def process_audio_chunk(chunk_data, session_id):
         
         # Convert to numpy array
         audio_array = np.frombuffer(audio_data, dtype=np.int16)
+        print(f"Audio data shape: {audio_array.shape}, dtype: {audio_array.dtype}")
+        print(f"Audio data range: [{np.min(audio_array):.3f}, {np.max(audio_array):.3f}]")
         
         # Convert to float32 and normalize
         audio_float = audio_array.astype(np.float32) / 32768.0
@@ -304,9 +306,10 @@ def process_audio_chunk(chunk_data, session_id):
                 wav_file.setframerate(SAMPLE_RATE)
                 wav_file.writeframes((audio_float * 32768).astype(np.int16).tobytes())
         
-        print(f"Running whisper on {temp_filename}")
+        print(f"Created WAV file: {temp_filename}")
         
         # Run Whisper with lenient parameters
+        print("Running Whisper transcription...")
         result = model.transcribe(
             temp_filename,
             language="en",
@@ -326,16 +329,22 @@ def process_audio_chunk(chunk_data, session_id):
         os.unlink(temp_filename)
         
         if result and result["text"].strip():
-            print(f"Transcription: {result['text']}")
+            print(f"\n=== Transcription Result ===")
+            print(f"Raw text: {result['text']}")
+            
             # Emit each word
             words = result["text"].split()
+            print(f"Words detected: {words}")
             for word in words:
+                print(f"Emitting word: {word}")
                 emit_word(session_id, word)
+            
             # Emit full transcription
+            print(f"Emitting full transcription: {result['text']}")
             socketio.emit('partial_result', {'text': result["text"]}, room=session_id)
             return result["text"]
         else:
-            print("No transcription result")
+            print("No transcription result - Whisper returned empty text")
             return None
             
     except Exception as e:
@@ -479,13 +488,13 @@ def handle_start_stream(data=None):
 @socketio.on('audio_chunk')
 def handle_audio_chunk(data):
     session_id = request.sid
-    print(f"Received audio chunk from session {session_id}")
+    print(f"\n=== Received audio chunk from session {session_id} ===")
     
     try:
         # Process the chunk directly
         transcription = process_audio_chunk(data['chunk'], session_id)
         if transcription:
-            print(f"Transcription result: {transcription}")
+            print(f"Successfully transcribed: {transcription}")
         else:
             print("No transcription result received")
     except Exception as e:
