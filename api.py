@@ -110,33 +110,47 @@ def buffer_audio_chunk(chunk_data, session_id):
         
         with stream_locks[session_id]:
             # Convert base64 to bytes
-            audio_bytes = base64.b64decode(chunk_data)
-            audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
-            
-            # Add to buffer
-            audio_buffers[session_id].append(audio_data)
-            
-            # Calculate total duration
-            total_duration = sum(len(chunk) for chunk in audio_buffers[session_id]) / SAMPLE_RATE
-            logger.info(f"Total buffered duration: {total_duration:.3f}s")
-            
-            # Process if we have enough data
-            if total_duration >= MIN_BUFFER_DURATION:
-                # Combine all chunks
-                combined_audio = np.concatenate(audio_buffers[session_id])
+            try:
+                # Add padding if needed
+                padding = 4 - (len(chunk_data) % 4)
+                if padding != 4:
+                    chunk_data = chunk_data + ('=' * padding)
                 
-                # Process the audio
-                result = process_audio_data(combined_audio, session_id)
+                audio_bytes = base64.b64decode(chunk_data)
+                audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
                 
-                # Keep the last chunk if it's recent
-                if len(audio_buffers[session_id]) > 1:
-                    audio_buffers[session_id] = [audio_buffers[session_id][-1]]
+                # Ensure even length
+                if len(audio_data) % 2 != 0:
+                    audio_data = audio_data[:-1]
+                
+                # Add to buffer
+                audio_buffers[session_id].append(audio_data)
+                
+                # Calculate total duration
+                total_duration = sum(len(chunk) for chunk in audio_buffers[session_id]) / SAMPLE_RATE
+                logger.info(f"Total buffered duration: {total_duration:.3f}s")
+                
+                # Process if we have enough data
+                if total_duration >= MIN_BUFFER_DURATION:
+                    # Combine all chunks
+                    combined_audio = np.concatenate(audio_buffers[session_id])
+                    
+                    # Process the audio
+                    result = process_audio_data(combined_audio, session_id)
+                    
+                    # Keep the last chunk if it's recent
+                    if len(audio_buffers[session_id]) > 1:
+                        audio_buffers[session_id] = [audio_buffers[session_id][-1]]
+                    else:
+                        audio_buffers[session_id] = []
+                    
+                    return result
                 else:
-                    audio_buffers[session_id] = []
-                
-                return result
-            else:
-                logger.info(f"Buffering audio chunk, current duration: {total_duration:.3f}s")
+                    logger.info(f"Buffering audio chunk, current duration: {total_duration:.3f}s")
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"Error processing audio data: {str(e)}")
                 return None
                 
     except Exception as e:
@@ -254,33 +268,12 @@ def process_audio_chunk(chunk_data, session_id):
     """Process an audio chunk and return transcription"""
     try:
         logger.info("Starting to process audio chunk...")
-        # Convert base64 to bytes if needed
-        if isinstance(chunk_data, str):
-            logger.info("Converting base64 to bytes...")
-            chunk_data = base64.b64decode(chunk_data)
-            logger.info(f"Decoded chunk size: {len(chunk_data)} bytes")
         
-        # Ensure chunk_data length is even
-        if len(chunk_data) % 2 != 0:
-            chunk_data = chunk_data[:-1]
-            logger.info("Adjusted chunk size to even length")
+        # Ensure chunk_data is a string
+        if not isinstance(chunk_data, str):
+            chunk_data = chunk_data.decode('utf-8')
         
-        # Convert bytes to numpy array
-        audio_data = np.frombuffer(chunk_data, dtype=np.int16)
-        logger.info(f"Audio data shape: {audio_data.shape}, dtype: {audio_data.dtype}")
-        
-        # Ensure audio data is not empty
-        if len(audio_data) == 0:
-            logger.warning("Empty audio data received")
-            return None
-        
-        # Convert to float32 and normalize
-        audio_data = audio_data.astype(np.float32) / 32768.0
-        logger.info(f"Audio data range: [{np.min(audio_data):.3f}, {np.max(audio_data):.3f}]")
-        
-        # Apply noise gate
-        audio_data[np.abs(audio_data) < NOISE_FLOOR] = 0
-        logger.info(f"Non-zero samples after noise gate: {np.count_nonzero(audio_data)}")
+        logger.info("Converting base64 to bytes...")
         
         # Process the audio chunk
         result = buffer_audio_chunk(chunk_data, session_id)
