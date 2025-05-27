@@ -18,21 +18,20 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Install Python dependencies
 RUN pip install --no-cache-dir \
-    flask \
-    flask-socketio \
-    eventlet \
-    boto3 \
+    fastapi \
+    uvicorn[standard] \
+    python-multipart \
     numpy \
     scipy
 
 # Install PyTorch CPU version
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
-# Install Whisper
-RUN pip install --no-cache-dir openai-whisper
+# Install faster-whisper
+RUN pip install --no-cache-dir faster-whisper
 
 # Pre-download the Whisper model
-RUN python3 -c "import whisper; whisper.load_model('base.en')"
+RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('base.en', device='cpu', compute_type='int8')"
 
 # Create necessary directories
 RUN mkdir -p /opt/whisper/samples
@@ -49,12 +48,13 @@ RUN apt-get update && apt-get install -y \
 
 # Copy virtual environment and downloaded model from builder
 COPY --from=builder /opt/venv /opt/venv
-COPY --from=builder /root/.cache/whisper /root/.cache/whisper
+COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy application files
 WORKDIR /app
 COPY api.py /app/
+COPY index.html /app/
 
 # Create necessary directories
 RUN mkdir -p /opt/whisper/samples
@@ -63,4 +63,4 @@ RUN mkdir -p /opt/whisper/samples
 EXPOSE 5000
 
 # Run the application
-CMD ["python3", "api.py"]
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "5000"]

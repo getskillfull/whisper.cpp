@@ -1,147 +1,42 @@
-from flask import Flask, request, jsonify
-import os
-import subprocess
+from fastapi import FastAPI, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+import asyncio
+from faster_whisper import WhisperModel
 import tempfile
-from werkzeug.utils import secure_filename
-import boto3
-from botocore.exceptions import ClientError
-from flask_socketio import SocketIO, emit
 import base64
 import wave
-import io
 import numpy as np
-from threading import Lock
-import queue
-import time
-import logging
-import whisper
-import ssl
 from scipy import signal
-import threading
+import os
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ---- Model Configuration ----
+MODEL_SIZE = "base.en"
+DEVICE = "cpu"  # "cuda" or "cpu"
+COMPUTE_TYPE = "int8"  # "float16" if DEVICE == "cuda" else "int8"
 
-app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=60, ping_interval=25)
-
-# Configure upload folder
-UPLOAD_FOLDER = '/opt/whisper/samples'
-ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'm4a'}
-
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
-
-# Global variables for streaming
-stream_buffers = {}
-stream_locks = {}
-audio_buffers = {}
-
-# Constants for audio processing
-CHUNK_SIZE = 1024
-SAMPLE_RATE = 16000
-MIN_AUDIO_LENGTH = 0.1  # Minimum audio length in seconds
-NOISE_FLOOR = 0.001  # Reduced noise floor for more lenient detection
-MIN_SPEECH_DURATION = 0.05  # Reduced minimum speech duration
-MAX_BUFFER_DURATION = 1.0  # Increased buffer duration for better context
-MIN_BUFFER_DURATION = 0.5  # Increased minimum buffer duration
-BUFFER_TIMEOUT = 0.3  # Buffer timeout
-
-# Buffer for each session
-last_buffer_time = {}
-
-# Initialize Whisper model
+# ---- Load Model Once ----
 print("Loading Whisper model...")
-model = whisper.load_model("base.en")
+model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
 print("Whisper model loaded successfully")
 
-def create_wav_header(sample_rate, channels=1, sample_width=4):
-    """Create a WAV header for the given parameters"""
-    header = bytearray()
-    # RIFF header
-    header.extend(b'RIFF')
-    header.extend((0).to_bytes(4, 'little'))  # File size - 8 (to be filled later)
-    header.extend(b'WAVE')
-    # fmt chunk
-    header.extend(b'fmt ')
-    header.extend((16).to_bytes(4, 'little'))  # fmt chunk size
-    header.extend((3).to_bytes(2, 'little'))   # Audio format (3 for float32)
-    header.extend((channels).to_bytes(2, 'little'))  # Number of channels
-    header.extend((sample_rate).to_bytes(4, 'little'))  # Sample rate
-    header.extend((sample_rate * channels * sample_width).to_bytes(4, 'little'))  # Byte rate
-    header.extend((channels * sample_width).to_bytes(2, 'little'))  # Block align
-    header.extend((sample_width * 8).to_bytes(2, 'little'))  # Bits per sample
-    # data chunk
-    header.extend(b'data')
-    header.extend((0).to_bytes(4, 'little'))  # Data chunk size (to be filled later)
-    return header
+app = FastAPI()
 
-def pad_audio_with_silence(audio_data, target_length_ms=1000):
-    """Pad audio data with silence to reach target length"""
-    current_length_ms = len(audio_data) / SAMPLE_RATE * 1000
-    if current_length_ms >= target_length_ms:
-        return audio_data
-        
-    # Calculate number of silence samples needed
-    silence_samples = int((target_length_ms - current_length_ms) * SAMPLE_RATE / 1000)
-    silence = np.zeros(silence_samples, dtype=np.float32)
-    
-    # Add silence to both ends for better context
-    half_silence = silence_samples // 2
-    return np.concatenate([
-        np.zeros(half_silence, dtype=np.float32),
-        audio_data,
-        np.zeros(silence_samples - half_silence, dtype=np.float32)
-    ])
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def is_silence(audio_data, sample_rate=SAMPLE_RATE):
-    """Check if the audio segment is silence."""
-    if len(audio_data) == 0:
-        return True
-        
-    # Calculate RMS energy
-    rms = np.sqrt(np.mean(np.square(audio_data.astype(np.float32))))
-    
-    # Count non-zero samples
-    non_zero = np.count_nonzero(np.abs(audio_data) > NOISE_FLOOR * 32768)
-    non_zero_ratio = non_zero / len(audio_data)
-    
-    # Calculate duration
-    duration = len(audio_data) / sample_rate
-    
-    # Log audio characteristics
-    print(f"Audio stats - RMS: {rms:.6f}, Non-zero ratio: {non_zero_ratio:.2f}, Duration: {duration:.3f}s")
-    
-    # More lenient silence detection
-    return (rms < NOISE_FLOOR and non_zero_ratio < 0.1) or duration < MIN_SPEECH_DURATION
+# Constants for audio processing
+SAMPLE_RATE = 16000
+CHUNK_SIZE = 1024
 
-def process_buffered_audio(session_id):
-    """Process any remaining audio in the buffer"""
-    if session_id not in audio_buffers or not audio_buffers[session_id]:
-        return None
-    
-    # Calculate total duration of buffered audio
-    total_samples = sum(len(chunk) for chunk in audio_buffers[session_id])
-    total_duration = total_samples / SAMPLE_RATE
-    
-    # Only process if we have minimum duration
-    if total_duration >= MIN_BUFFER_DURATION:
-        combined_audio = np.concatenate(audio_buffers[session_id])
-        audio_buffers[session_id] = []  # Clear buffer
-        return process_audio_data(combined_audio, session_id)
-    
-    return None
-
-def emit_word(session_id, word):
-    """Emit a single word to the client"""
-    try:
-        socketio.emit('word', {'text': word}, room=session_id)
-    except Exception as e:
-        logger.error(f"Error emitting word: {e}")
-
-def process_audio_data(audio_data, session_id):
-    """Process audio data and return transcription."""
+def process_audio_data(audio_data):
+    """Process audio data and return numpy array"""
     try:
         # Convert to float32 and normalize
         audio_float = audio_data.astype(np.float32) / 32768.0
@@ -152,373 +47,147 @@ def process_audio_data(audio_data, session_id):
         b, a = signal.butter(4, cutoff/nyquist, btype='high')
         audio_float = signal.filtfilt(b, a, audio_float)
         
-        # Create temporary WAV file
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-            temp_filename = temp_file.name
-            with wave.open(temp_filename, 'wb') as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(SAMPLE_RATE)
-                wav_file.writeframes((audio_float * 32768).astype(np.int16).tobytes())
-        
-        print(f"Running whisper on {temp_filename}")
-        
-        # Run Whisper with more lenient parameters
-        result = model.transcribe(
-            temp_filename,
-            language="en",
-            task="transcribe",
-            fp16=False,
-            beam_size=1,  # Reduced for faster processing
-            best_of=1,    # Reduced for faster processing
-            temperature=0.0,  # Deterministic output
-            no_speech_threshold=0.2,  # Even more lenient no-speech detection
-            logprob_threshold=-1.0,   # More lenient log probability threshold
-            compression_ratio_threshold=2.4,  # More lenient compression ratio
-            condition_on_previous_text=True,  # Use previous context
-            initial_prompt="Transcribe the following audio:"  # Help with context
-        )
-        
-        # Clean up temporary file
-        os.unlink(temp_filename)
-        
-        if result and result["text"].strip():
-            print(f"Raw transcription: {result['text']}")
-            
-            # Emit each word with a small delay
-            words = result["text"].split()
-            for word in words:
-                emit_word(session_id, word)
-                time.sleep(0.05)  # Small delay between words
-            
-            # Also emit the full transcription
-            socketio.emit('partial_result', {'text': result["text"]}, room=session_id)
-            return result["text"]
-        else:
-            print("Whisper returned empty result")
-            return None
-            
+        return audio_float
     except Exception as e:
-        print(f"Error in process_audio_data: {str(e)}")
+        print(f"Error processing audio data: {str(e)}")
         return None
 
-def buffer_audio_chunk(chunk_data, session_id):
-    """Buffer audio chunks and process when enough data is collected."""
+@app.post("/transcribe")
+async def transcribe(file: UploadFile):
+    """Handle file upload transcription"""
     try:
-        # Ensure chunk_data is a string
-        if isinstance(chunk_data, bytes):
-            chunk_data = chunk_data.decode('utf-8')
-            
-        # Add padding if needed
-        padding = len(chunk_data) % 4
-        if padding:
-            chunk_data += '=' * (4 - padding)
-            
-        # Decode base64
-        audio_data = base64.b64decode(chunk_data)
-        
-        # Ensure audio data length is even
-        if len(audio_data) % 2 != 0:
-            audio_data = audio_data[:-1]
-            
-        # Convert to numpy array
-        audio_array = np.frombuffer(audio_data, dtype=np.int16)
-        
-        # Log audio data details
-        print(f"Audio data shape: {audio_array.shape}, dtype: {audio_array.dtype}")
-        print(f"Audio data range: [{np.min(audio_array):.3f}, {np.max(audio_array):.3f}]")
-        
-        # Apply noise gate
-        noise_gate = NOISE_FLOOR * 32768
-        audio_array[np.abs(audio_array) < noise_gate] = 0
-        
-        # Count non-zero samples
-        non_zero = np.count_nonzero(audio_array)
-        print(f"Non-zero samples after noise gate: {non_zero}")
-        
-        # Initialize buffer if needed
-        if session_id not in audio_buffers:
-            audio_buffers[session_id] = []
-            
-        # Append audio data to buffer
-        audio_buffers[session_id].append(audio_array)
-        
-        # Calculate total buffered duration
-        total_samples = sum(len(chunk) for chunk in audio_buffers[session_id])
-        total_duration = total_samples / SAMPLE_RATE
-        print(f"Total buffered duration: {total_duration:.3f}s")
-        
-        # Process if we have enough audio
-        if total_duration >= MIN_BUFFER_DURATION:
-            # Concatenate all chunks
-            full_audio = np.concatenate(audio_buffers[session_id])
-            
-            # Process the audio
-            result = process_audio_data(full_audio, session_id)
-            
-            # Keep only the last chunk for context
-            audio_buffers[session_id] = [audio_array]
-            
-            return result
-        else:
-            print(f"Buffering audio chunk, current duration: {total_duration:.3f}s")
-            return None
-            
+        with tempfile.NamedTemporaryFile(delete=True) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp.flush()
+            segments, info = model.transcribe(tmp.name, beam_size=1)
+            text = "".join([seg.text for seg in segments])
+            return JSONResponse({"text": text, "language": info.language})
     except Exception as e:
-        print(f"Error in buffer_audio_chunk: {str(e)}")
-        return None
+        return JSONResponse({"error": str(e)}, status_code=500)
 
-def process_audio_chunk(chunk_data, session_id):
-    """Process an audio chunk and return transcription"""
-    try:
-        print(f"\n=== Processing new audio chunk for session {session_id} ===")
-        print(f"Chunk data type: {type(chunk_data)}")
-        print(f"Chunk data length: {len(chunk_data) if isinstance(chunk_data, (str, bytes)) else 'unknown'}")
-        
-        # Ensure chunk_data is a string
-        if isinstance(chunk_data, bytes):
-            chunk_data = chunk_data.decode('utf-8')
-        
-        # Add padding if needed
-        padding = len(chunk_data) % 4
-        if padding:
-            chunk_data += '=' * (4 - padding)
-        
-        # Decode base64
+@app.websocket("/ws/transcribe")
+async def websocket_transcribe(ws: WebSocket):
+    await ws.accept()
+    print("[WS] Client connected.")
+    
+    # Use NamedTemporaryFile to buffer
+    with tempfile.NamedTemporaryFile(delete=True, suffix=".wav") as tmp:
+        audio_received = 0
+        transcribing = False
+        buffer = bytearray()
+        task = None
+
+        async def run_transcribe():
+            nonlocal buffer
+            try:
+                # Write buffer to temp file for chunk decode
+                tmp.seek(0)
+                tmp.write(buffer)
+                tmp.flush()
+                
+                # Process audio data
+                audio_data = np.frombuffer(buffer, dtype=np.int16)
+                processed_audio = process_audio_data(audio_data)
+                
+                if processed_audio is not None:
+                    # Write processed audio to WAV file
+                    with wave.open(tmp.name, 'wb') as wav_file:
+                        wav_file.setnchannels(1)
+                        wav_file.setsampwidth(2)
+                        wav_file.setframerate(SAMPLE_RATE)
+                        wav_file.writeframes((processed_audio * 32768).astype(np.int16).tobytes())
+                    
+                    # Use stream() for partials
+                    for segment in model.stream(tmp.name, beam_size=1):
+                        if segment.text.strip():
+                            print(f"Transcribed: {segment.text}")
+                            await ws.send_json({
+                                "type": "partial",
+                                "text": segment.text,
+                                "words": segment.text.split()
+                            })
+            except Exception as e:
+                print(f"Error in transcription: {str(e)}")
+                await ws.send_json({"type": "error", "error": str(e)})
+
         try:
-            audio_data = base64.b64decode(chunk_data)
-            print(f"Successfully decoded base64 data, length: {len(audio_data)}")
+            while True:
+                # Receive base64 encoded audio chunk
+                data = await ws.receive_json()
+                if 'chunk' not in data:
+                    continue
+                    
+                # Decode base64
+                try:
+                    chunk_data = data['chunk']
+                    if isinstance(chunk_data, str):
+                        # Add padding if needed
+                        padding = len(chunk_data) % 4
+                        if padding:
+                            chunk_data += '=' * (4 - padding)
+                        audio_chunk = base64.b64decode(chunk_data)
+                    else:
+                        audio_chunk = chunk_data
+                        
+                    buffer.extend(audio_chunk)
+                    audio_received += len(audio_chunk)
+                    
+                    # Start transcription after receiving enough audio
+                    if not transcribing and audio_received > 40960:  # ~1s of audio
+                        print(f"Starting transcription after receiving {audio_received} bytes")
+                        transcribing = True
+                        task = asyncio.create_task(run_transcribe())
+                        
+                except Exception as e:
+                    print(f"Error processing chunk: {str(e)}")
+                    await ws.send_json({"type": "error", "error": str(e)})
+                    
+        except WebSocketDisconnect:
+            print("[WS] Client disconnected.")
         except Exception as e:
-            print(f"Error decoding base64: {str(e)}")
-            return None
-        
-        # Ensure audio data length is even
-        if len(audio_data) % 2 != 0:
-            audio_data = audio_data[:-1]
-        
-        # Convert to numpy array
-        audio_array = np.frombuffer(audio_data, dtype=np.int16)
-        print(f"Audio data shape: {audio_array.shape}, dtype: {audio_array.dtype}")
-        print(f"Audio data range: [{np.min(audio_array):.3f}, {np.max(audio_array):.3f}]")
-        
-        # Check if audio is too quiet
-        if np.max(np.abs(audio_array)) < 1000:  # Arbitrary threshold
-            print("Audio is too quiet, skipping")
-            return None
-        
-        # Convert to float32 and normalize
-        audio_float = audio_array.astype(np.float32) / 32768.0
-        
-        # Create temporary WAV file
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-            temp_filename = temp_file.name
-            with wave.open(temp_filename, 'wb') as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(SAMPLE_RATE)
-                wav_file.writeframes((audio_float * 32768).astype(np.int16).tobytes())
-        
-        print(f"Created WAV file: {temp_filename}")
-        
-        # Run Whisper with lenient parameters
-        print("Running Whisper transcription...")
-        result = model.transcribe(
-            temp_filename,
-            language="en",
-            task="transcribe",
-            fp16=False,
-            beam_size=1,
-            best_of=1,
-            temperature=0.0,
-            no_speech_threshold=0.1,  # Very lenient no-speech detection
-            logprob_threshold=-1.0,
-            compression_ratio_threshold=2.4,
-            condition_on_previous_text=True,
-            initial_prompt="Transcribe the following audio:"
-        )
-        
-        # Clean up temporary file
-        os.unlink(temp_filename)
-        
-        if result and result["text"].strip():
-            print(f"\n=== Transcription Result ===")
-            print(f"Raw text: {result['text']}")
-            
-            # Emit each word
-            words = result["text"].split()
-            print(f"Words detected: {words}")
-            for word in words:
-                print(f"Emitting word: {word}")
-                emit_word(session_id, word)
-            
-            # Emit full transcription
-            print(f"Emitting full transcription: {result['text']}")
-            socketio.emit('partial_result', {'text': result["text"]}, room=session_id)
-            return result["text"]
-        else:
-            print("No transcription result - Whisper returned empty text")
-            return None
-            
-    except Exception as e:
-        print(f"Error processing chunk: {str(e)}")
-        return None
+            print(f"WebSocket error: {str(e)}")
+            await ws.send_json({"type": "error", "error": str(e)})
+        finally:
+            if task:
+                await task
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def download_from_s3(bucket_name, object_key, local_path):
-    try:
-        s3_client = boto3.client('s3')
-        s3_client.download_file(bucket_name, object_key, local_path)
-        return True
-    except ClientError as e:
-        print(f"Error downloading from S3: {e}")
-        return False
-
-def generate_presigned_url(bucket_name, object_key, expiration=3600):
-    try:
-        s3_client = boto3.client('s3')
-        url = s3_client.generate_presigned_url(
-            'get_object',
-            Params={
-                'Bucket': bucket_name,
-                'Key': object_key
-            },
-            ExpiresIn=expiration
-        )
-        return url
-    except ClientError as e:
-        print(f"Error generating presigned URL: {e}")
-        return None
-
-@app.route('/get-s3-url', methods=['POST'])
-def get_s3_url():
-    if 's3_path' not in request.form:
-        return jsonify({'error': 'No S3 path provided'}), 400
-    
-    try:
-        s3_path = request.form['s3_path']
-        bucket_name = s3_path.split('/')[0]
-        object_key = '/'.join(s3_path.split('/')[1:])
+        # On disconnect: send final transcript
+        try:
+            if buffer:
+                tmp.seek(0)
+                tmp.write(buffer)
+                tmp.flush()
+                
+                # Process final audio
+                audio_data = np.frombuffer(buffer, dtype=np.int16)
+                processed_audio = process_audio_data(audio_data)
+                
+                if processed_audio is not None:
+                    # Write processed audio to WAV file
+                    with wave.open(tmp.name, 'wb') as wav_file:
+                        wav_file.setnchannels(1)
+                        wav_file.setsampwidth(2)
+                        wav_file.setframerate(SAMPLE_RATE)
+                        wav_file.writeframes((processed_audio * 32768).astype(np.int16).tobytes())
+                    
+                    segments, info = model.transcribe(tmp.name, beam_size=1)
+                    text = "".join([seg.text for seg in segments])
+                    await ws.send_json({
+                        "type": "final",
+                        "text": text,
+                        "language": info.language
+                    })
+        except Exception as e:
+            print(f"Error in final transcription: {str(e)}")
+            await ws.send_json({"type": "error", "error": str(e)})
         
-        url = generate_presigned_url(bucket_name, object_key)
-        if url:
-            return jsonify({
-                'url': url,
-                'expires_in': 3600
-            })
-        else:
-            return jsonify({'error': 'Failed to generate URL'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        await ws.close()
 
-@app.route('/transcribe', methods=['POST'])
-def transcribe():
-    if 'file' not in request.files and 's3_path' not in request.form:
-        return jsonify({'error': 'No file provided'}), 400
-    
-    try:
-        if 'file' in request.files:
-            # Handle direct file upload
-            file = request.files['file']
-            if file.filename == '':
-                return jsonify({'error': 'No file selected'}), 400
-            
-            if not allowed_file(file.filename):
-                return jsonify({'error': 'File type not allowed'}), 400
-            
-            filename = secure_filename(file.filename)
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-            file.save(filepath)
-        else:
-            # Handle S3 file
-            s3_path = request.form['s3_path']
-            bucket_name = s3_path.split('/')[0]
-            object_key = '/'.join(s3_path.split('/')[1:])
-            filename = os.path.basename(object_key)
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            
-            if not download_from_s3(bucket_name, object_key, filepath):
-                return jsonify({'error': 'Failed to download file from S3'}), 500
-        
-        # Run whisper-cli
-        result = subprocess.run([
-            '/app/build/bin/whisper-cli',
-            '-m', '/app/models/ggml-base.en.bin',
-            '-f', filepath
-        ], capture_output=True, text=True)
-        
-        # Clean up the file
-        os.remove(filepath)
-        
-        if result.returncode == 0:
-            return jsonify({
-                'transcription': result.stdout,
-                'status': 'success'
-            })
-        else:
-            return jsonify({
-                'error': 'Transcription failed',
-                'details': result.stderr
-            }), 500
-            
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({'status': 'healthy'})
-
-@socketio.on('connect')
-def handle_connect():
-    session_id = request.sid
-    print(f"\n=== New client connected: {session_id} ===")
-    emit('message', {'data': 'Connected to Whisper WebSocket server.'})
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    session_id = request.sid
-    print(f"\n=== Client disconnected: {session_id} ===")
-
-@socketio.on('start_stream')
-def handle_start_stream(data=None):
-    session_id = request.sid
-    print(f"\n=== Stream started for session: {session_id} ===")
-    emit('stream_started', {'message': 'Stream started successfully'})
-
-@socketio.on('audio_chunk')
-def handle_audio_chunk(data):
-    session_id = request.sid
-    print(f"\n=== Received audio chunk from session {session_id} ===")
-    
-    if not data or 'chunk' not in data:
-        print("Error: No audio chunk data received")
-        emit('error', {'message': 'No audio chunk data received'})
-        return
-        
-    try:
-        print(f"Audio chunk length: {len(data['chunk'])}")
-        # Process the chunk directly
-        transcription = process_audio_chunk(data['chunk'], session_id)
-        if transcription:
-            print(f"Successfully transcribed: {transcription}")
-        else:
-            print("No transcription result received")
-    except Exception as e:
-        print(f"Error processing chunk: {str(e)}")
-        emit('error', {'message': f'Error processing chunk: {str(e)}'})
-
-@socketio.on('end_stream')
-def handle_end_stream(data=None):
-    session_id = request.sid
-    print(f"\n=== Stream ended for session: {session_id} ===")
-    emit('final_result', {'text': 'Stream ended successfully'})
-
-if __name__ == '__main__':
-    try:
-        logger.info("Starting Flask application...")
-        socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False)
-    except Exception as e:
-        logger.error(f"Error starting Flask application: {e}")
-        raise 
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=5000) 
