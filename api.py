@@ -7,7 +7,7 @@ from scipy import signal
 import os
 import logging
 
-from fastapi import FastAPI, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 # —— Configuration —— 
 MODEL_SIZE   = "base"       # e.g. "tiny", "base", "small", "medium", "large"
-DEVICE       = "cpu"        # or "cuda"
-COMPUTE_TYPE = "int8"       # depends on your setup
+DEVICE       = "cpu"        # Using CPU since Docker is configured for CPU
+COMPUTE_TYPE = "int8"       # Using int8 for CPU optimization
 
 # —— Initialize model & app —— 
 model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
@@ -110,7 +110,6 @@ async def websocket_transcribe(ws: WebSocket):
                         wav_file.writeframes((processed_audio * 32768).astype(np.int16).tobytes())
                     
                     logger.info("Starting transcription...")
-                    # Use transcribe instead of stream
                     segments, info = model.transcribe(tmp.name, beam_size=1)
                     for segment in segments:
                         if segment.text.strip():

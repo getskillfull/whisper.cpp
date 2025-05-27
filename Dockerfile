@@ -23,7 +23,10 @@ RUN pip install --no-cache-dir \
     python-multipart \
     numpy \
     scipy \
-    wave
+    wave \
+    python-jose[cryptography] \
+    passlib[bcrypt] \
+    python-multipart
 
 # Install PyTorch CPU version
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
@@ -64,4 +67,4 @@ RUN mkdir -p /opt/whisper/samples
 EXPOSE 5000
 
 # Run the application
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "5000"]
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "5000", "--log-level", "info"]
