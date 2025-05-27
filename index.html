@@ -225,7 +225,10 @@
                     audio: {
                         channelCount: 1,
                         sampleRate: 16000,
-                        sampleSize: 16
+                        sampleSize: 16,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
                     }
                 });
                 console.log('Microphone access granted');
@@ -234,7 +237,10 @@
                     mimeType: 'audio/webm;codecs=opus',
                     audioBitsPerSecond: 16000
                 });
-                console.log('MediaRecorder created');
+                console.log('MediaRecorder created with settings:', {
+                    mimeType: mediaRecorder.mimeType,
+                    audioBitsPerSecond: mediaRecorder.audioBitsPerSecond
+                });
                 
                 mediaRecorder.ondataavailable = (event) => {
                     if (event.data.size > 0) {
