@@ -84,47 +84,61 @@ async def websocket_transcribe(ws: WebSocket):
         transcribing = False
         buffer = bytearray()
         task = None
+        last_text = ""
 
         async def run_transcribe():
-            nonlocal buffer
+            nonlocal buffer, last_text
             try:
-                # Write buffer to temp file for chunk decode
-                tmp.seek(0)
-                tmp.write(buffer)
-                tmp.flush()
-                
-                # Process audio data
-                audio_data = np.frombuffer(buffer, dtype=np.int16)
-                logger.info(f"Audio buffer size: {len(buffer)} bytes")
-                logger.info(f"Audio data shape: {audio_data.shape}")
-                logger.info(f"Audio data range: [{np.min(audio_data)}, {np.max(audio_data)}]")
-                
-                processed_audio = process_audio_data(audio_data)
-                
-                if processed_audio is not None:
-                    # Write processed audio to WAV file
-                    with wave.open(tmp.name, 'wb') as wav_file:
-                        wav_file.setnchannels(1)
-                        wav_file.setsampwidth(2)
-                        wav_file.setframerate(SAMPLE_RATE)
-                        wav_file.writeframes((processed_audio * 32768).astype(np.int16).tobytes())
+                while True:
+                    if len(buffer) < 8192:  # Wait for more audio
+                        await asyncio.sleep(0.1)
+                        continue
+
+                    # Write current buffer to temp file
+                    tmp.seek(0)
+                    tmp.write(buffer)
+                    tmp.flush()
                     
-                    logger.info("Starting transcription...")
-                    segments, info = model.transcribe(tmp.name, beam_size=1)
-                    for segment in segments:
-                        if segment.text.strip():
-                            logger.info(f"Transcribed: {segment.text}")
-                            try:
-                                await ws.send_json({
-                                    "type": "partial",
-                                    "text": segment.text,
-                                    "words": segment.text.split()
-                                })
-                            except Exception as e:
-                                logger.error(f"Error sending transcription: {str(e)}")
-                                return
-                else:
-                    logger.warning("No processed audio data available for transcription")
+                    # Process audio data
+                    audio_data = np.frombuffer(buffer, dtype=np.int16)
+                    logger.info(f"Processing chunk: {len(buffer)} bytes")
+                    
+                    processed_audio = process_audio_data(audio_data)
+                    
+                    if processed_audio is not None:
+                        # Write processed audio to WAV file
+                        with wave.open(tmp.name, 'wb') as wav_file:
+                            wav_file.setnchannels(1)
+                            wav_file.setsampwidth(2)
+                            wav_file.setframerate(SAMPLE_RATE)
+                            wav_file.writeframes((processed_audio * 32768).astype(np.int16).tobytes())
+                        
+                        # Transcribe the current chunk
+                        segments, info = model.transcribe(tmp.name, beam_size=1)
+                        current_text = ""
+                        
+                        for segment in segments:
+                            if segment.text.strip():
+                                current_text += segment.text + " "
+                                logger.info(f"Transcribed: {segment.text}")
+                                try:
+                                    # Only send if text has changed
+                                    if current_text != last_text:
+                                        await ws.send_json({
+                                            "type": "partial",
+                                            "text": current_text.strip(),
+                                            "words": current_text.strip().split()
+                                        })
+                                        last_text = current_text
+                                except Exception as e:
+                                    logger.error(f"Error sending transcription: {str(e)}")
+                                    return
+                        
+                        # Keep only the last 2 seconds of audio in the buffer
+                        buffer = buffer[-SAMPLE_RATE * 2 * 2:]  # 2 seconds * 2 bytes per sample
+                    
+                    await asyncio.sleep(0.1)  # Small delay to prevent CPU overload
+                    
             except Exception as e:
                 logger.error(f"Error in transcription: {str(e)}")
                 try:
