@@ -7,8 +7,8 @@ from faster_whisper import WhisperModel
 
 # —— Configuration —— 
 MODEL_SIZE   = "base"       # e.g. "tiny", "base", "small", "medium", "large"
-DEVICE       = "cuda"       # or "cpu"
-COMPUTE_TYPE = "float16"    # depends on your setup
+DEVICE       = "cpu"        # or "cuda"
+COMPUTE_TYPE = "int8"       # depends on your setup
 
 # —— Initialize model & app —— 
 model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)

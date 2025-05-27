@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04 as builder
+FROM ubuntu:22.04 as builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -24,20 +24,20 @@ RUN pip install --no-cache-dir \
     numpy \
     scipy
 
-# Install PyTorch with CUDA support
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu118
+# Install PyTorch CPU version (we'll use CPU for now)
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
 # Install faster-whisper
 RUN pip install --no-cache-dir faster-whisper
 
-# Pre-download the Whisper model
-RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cuda', compute_type='float16')"
+# Pre-download the Whisper model (using CPU)
+RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8')"
 
 # Create necessary directories
 RUN mkdir -p /opt/whisper/samples
 
 # Final stage
-FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
+FROM ubuntu:22.04
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
