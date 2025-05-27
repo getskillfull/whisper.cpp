@@ -22,15 +22,16 @@ RUN pip install --no-cache-dir \
     uvicorn[standard] \
     python-multipart \
     numpy \
-    scipy
+    scipy \
+    wave
 
-# Install PyTorch CPU version (we'll use CPU for now)
+# Install PyTorch CPU version
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
 # Install faster-whisper
 RUN pip install --no-cache-dir faster-whisper
 
-# Pre-download the Whisper model (using CPU)
+# Pre-download the Whisper model
 RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8')"
 
 # Create necessary directories
