@@ -134,42 +134,27 @@ async def websocket_transcribe(ws: WebSocket):
 
         try:
             while True:
-                # Receive base64 encoded audio chunk
-                data = await ws.receive_json()
-                if 'chunk' not in data:
-                    logger.warning("Received message without chunk data")
-                    continue
-                    
-                # Decode base64
-                try:
-                    chunk_data = data['chunk']
-                    logger.info(f"Received chunk data type: {type(chunk_data)}")
-                    
-                    if isinstance(chunk_data, str):
-                        # Add padding if needed
-                        padding = len(chunk_data) % 4
-                        if padding:
-                            chunk_data += '=' * (4 - padding)
-                        audio_chunk = base64.b64decode(chunk_data)
-                    else:
-                        audio_chunk = chunk_data
-                        
-                    logger.info(f"Decoded audio chunk size: {len(audio_chunk)} bytes")
-                    buffer.extend(audio_chunk)
-                    audio_received += len(audio_chunk)
+                # Receive raw PCM data
+                msg = await ws.receive()
+                
+                if "bytes" in msg:
+                    # Received a chunk of raw PCM audio
+                    chunk = msg["bytes"]
+                    logger.info(f"Received PCM chunk: {len(chunk)} bytes")
+                    buffer.extend(chunk)
+                    audio_received += len(chunk)
                     
                     # Start transcription after receiving enough audio
                     if not transcribing and audio_received > 8192:  # ~0.25s of audio
                         logger.info(f"Starting transcription after receiving {audio_received} bytes")
                         transcribing = True
                         task = asyncio.create_task(run_transcribe())
-                        
-                except Exception as e:
-                    logger.error(f"Error processing chunk: {str(e)}")
-                    try:
-                        await ws.send_json({"type": "error", "error": str(e)})
-                    except Exception:
-                        pass
+                elif "text" in msg:
+                    # Handle text messages (e.g., stop command)
+                    text = msg["text"]
+                    logger.info(f"Received text message: {text}")
+                    if text == "stop":
+                        break
                     
         except WebSocketDisconnect:
             logger.info("[WS] Client disconnected.")
