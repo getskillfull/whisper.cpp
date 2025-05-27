@@ -6,6 +6,7 @@ import numpy as np
 from scipy import signal
 import os
 import logging
+import time
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile
 from fastapi.responses import JSONResponse
@@ -85,13 +86,15 @@ async def websocket_transcribe(ws: WebSocket):
         buffer = bytearray()
         task = None
         last_text = ""
+        last_send_time = 0
+        min_send_interval = 0.1  # Minimum time between sends (seconds)
 
         async def run_transcribe():
-            nonlocal buffer, last_text
+            nonlocal buffer, last_text, last_send_time
             try:
                 while True:
-                    if len(buffer) < 8192:  # Wait for more audio
-                        await asyncio.sleep(0.1)
+                    if len(buffer) < 4096:  # Reduced buffer size for faster processing
+                        await asyncio.sleep(0.05)  # Reduced sleep time
                         continue
 
                     # Write current buffer to temp file
@@ -113,31 +116,43 @@ async def websocket_transcribe(ws: WebSocket):
                             wav_file.setframerate(SAMPLE_RATE)
                             wav_file.writeframes((processed_audio * 32768).astype(np.int16).tobytes())
                         
-                        # Transcribe the current chunk
-                        segments, info = model.transcribe(tmp.name, beam_size=1)
+                        # Transcribe with optimized settings
+                        segments, info = model.transcribe(
+                            tmp.name,
+                            beam_size=1,
+                            vad_filter=True,
+                            vad_parameters=dict(min_silence_duration_ms=500),
+                            condition_on_previous_text=True,
+                            no_speech_threshold=0.6
+                        )
+                        
                         current_text = ""
+                        current_time = time.time()
                         
                         for segment in segments:
                             if segment.text.strip():
                                 current_text += segment.text + " "
                                 logger.info(f"Transcribed: {segment.text}")
-                                try:
-                                    # Only send if text has changed
-                                    if current_text != last_text:
+                                
+                                # Only send if enough time has passed and text has changed
+                                if (current_time - last_send_time >= min_send_interval and 
+                                    current_text != last_text):
+                                    try:
                                         await ws.send_json({
                                             "type": "partial",
                                             "text": current_text.strip(),
                                             "words": current_text.strip().split()
                                         })
                                         last_text = current_text
-                                except Exception as e:
-                                    logger.error(f"Error sending transcription: {str(e)}")
-                                    return
+                                        last_send_time = current_time
+                                    except Exception as e:
+                                        logger.error(f"Error sending transcription: {str(e)}")
+                                        return
                         
-                        # Keep only the last 2 seconds of audio in the buffer
-                        buffer = buffer[-SAMPLE_RATE * 2 * 2:]  # 2 seconds * 2 bytes per sample
+                        # Keep only the last 1 second of audio in the buffer
+                        buffer = buffer[-SAMPLE_RATE * 2:]  # 1 second * 2 bytes per sample
                     
-                    await asyncio.sleep(0.1)  # Small delay to prevent CPU overload
+                    await asyncio.sleep(0.05)  # Reduced sleep time
                     
             except Exception as e:
                 logger.error(f"Error in transcription: {str(e)}")
@@ -159,7 +174,7 @@ async def websocket_transcribe(ws: WebSocket):
                     audio_received += len(chunk)
                     
                     # Start transcription after receiving enough audio
-                    if not transcribing and audio_received > 8192:  # ~0.25s of audio
+                    if not transcribing and audio_received > 4096:  # Reduced buffer size
                         logger.info(f"Starting transcription after receiving {audio_received} bytes")
                         transcribing = True
                         task = asyncio.create_task(run_transcribe())
@@ -205,7 +220,14 @@ async def websocket_transcribe(ws: WebSocket):
                         wav_file.setframerate(SAMPLE_RATE)
                         wav_file.writeframes((processed_audio * 32768).astype(np.int16).tobytes())
                     
-                    segments, info = model.transcribe(tmp.name, beam_size=1)
+                    segments, info = model.transcribe(
+                        tmp.name,
+                        beam_size=1,
+                        vad_filter=True,
+                        vad_parameters=dict(min_silence_duration_ms=500),
+                        condition_on_previous_text=True,
+                        no_speech_threshold=0.6
+                    )
                     text = "".join([seg.text for seg in segments])
                     logger.info(f"Final transcription: {text}")
                     try:

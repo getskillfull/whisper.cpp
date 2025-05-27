@@ -239,10 +239,18 @@
                     latencyHint: 'interactive'
                 });
                 const source = audioContext.createMediaStreamSource(stream);
-                const processor = audioContext.createScriptProcessor(1024, 1, 1);
+                // Reduce buffer size to 512 samples for lower latency
+                const processor = audioContext.createScriptProcessor(512, 1, 1);
+                
+                let lastSendTime = 0;
+                const minSendInterval = 50; // Minimum time between sends (ms)
                 
                 processor.onaudioprocess = (e) => {
                     if (!isRecording) return;
+                    
+                    const now = Date.now();
+                    if (now - lastSendTime < minSendInterval) return;
+                    lastSendTime = now;
                     
                     // Get raw PCM data
                     const inputData = e.inputBuffer.getChannelData(0);
@@ -255,7 +263,12 @@
                     
                     // Send raw PCM data
                     if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(pcmData.buffer);
+                        try {
+                            ws.send(pcmData.buffer);
+                        } catch (error) {
+                            console.error('Error sending audio data:', error);
+                            stopRecording();
+                        }
                     }
                 };
                 
