@@ -178,19 +178,23 @@
 
                 switch (data.type) {
                     case 'partial':
+                        console.log('Received partial transcription:', data);
                         // Update current word
                         if (data.words && data.words.length > 0) {
                             const lastWord = data.words[data.words.length - 1];
+                            console.log('Updating current word:', lastWord);
                             currentWordDiv.innerHTML = `<span class="current-word">${lastWord}</span>`;
                         }
                         // Update full transcription
                         if (data.text) {
+                            console.log('Updating full transcription:', data.text);
                             currentTranscription = data.text;
                             transcriptionDiv.textContent = currentTranscription;
                         }
                         break;
 
                     case 'final':
+                        console.log('Received final transcription:', data);
                         currentWordDiv.textContent = '';
                         if (data.text) {
                             currentTranscription = data.text;
@@ -241,9 +245,19 @@
                         reader.onloadend = () => {
                             const base64Audio = reader.result.split(',')[1];
                             console.log('Sending audio chunk to server...');
-                            ws.send(JSON.stringify({ chunk: base64Audio }));
+                            if (ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({ chunk: base64Audio }));
+                                console.log('Audio chunk sent successfully');
+                            } else {
+                                console.error('WebSocket is not open. Current state:', ws.readyState);
+                            }
+                        };
+                        reader.onerror = (error) => {
+                            console.error('Error reading audio chunk:', error);
                         };
                         reader.readAsDataURL(event.data);
+                    } else {
+                        console.warn('Received empty audio chunk');
                     }
                 };
 

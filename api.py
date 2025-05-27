@@ -9,6 +9,11 @@ import wave
 import numpy as np
 from scipy import signal
 import os
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ---- Model Configuration ----
 MODEL_SIZE = "base.en"
@@ -38,6 +43,9 @@ CHUNK_SIZE = 1024
 def process_audio_data(audio_data):
     """Process audio data and return numpy array"""
     try:
+        logger.info(f"Processing audio data of shape: {audio_data.shape}, dtype: {audio_data.dtype}")
+        logger.info(f"Audio range: [{np.min(audio_data)}, {np.max(audio_data)}]")
+        
         # Convert to float32 and normalize
         audio_float = audio_data.astype(np.float32) / 32768.0
         
@@ -47,9 +55,10 @@ def process_audio_data(audio_data):
         b, a = signal.butter(4, cutoff/nyquist, btype='high')
         audio_float = signal.filtfilt(b, a, audio_float)
         
+        logger.info(f"Processed audio range: [{np.min(audio_float)}, {np.max(audio_float)}]")
         return audio_float
     except Exception as e:
-        print(f"Error processing audio data: {str(e)}")
+        logger.error(f"Error processing audio data: {str(e)}")
         return None
 
 @app.post("/transcribe")
@@ -69,7 +78,7 @@ async def transcribe(file: UploadFile):
 @app.websocket("/ws/transcribe")
 async def websocket_transcribe(ws: WebSocket):
     await ws.accept()
-    print("[WS] Client connected.")
+    logger.info("[WS] Client connected.")
     
     # Use NamedTemporaryFile to buffer
     with tempfile.NamedTemporaryFile(delete=True, suffix=".wav") as tmp:
@@ -88,6 +97,9 @@ async def websocket_transcribe(ws: WebSocket):
                 
                 # Process audio data
                 audio_data = np.frombuffer(buffer, dtype=np.int16)
+                logger.info(f"Audio buffer size: {len(buffer)} bytes")
+                logger.info(f"Audio data shape: {audio_data.shape}")
+                
                 processed_audio = process_audio_data(audio_data)
                 
                 if processed_audio is not None:
@@ -98,17 +110,20 @@ async def websocket_transcribe(ws: WebSocket):
                         wav_file.setframerate(SAMPLE_RATE)
                         wav_file.writeframes((processed_audio * 32768).astype(np.int16).tobytes())
                     
+                    logger.info("Starting transcription...")
                     # Use stream() for partials
                     for segment in model.stream(tmp.name, beam_size=1):
                         if segment.text.strip():
-                            print(f"Transcribed: {segment.text}")
+                            logger.info(f"Transcribed: {segment.text}")
                             await ws.send_json({
                                 "type": "partial",
                                 "text": segment.text,
                                 "words": segment.text.split()
                             })
+                else:
+                    logger.warning("No processed audio data available for transcription")
             except Exception as e:
-                print(f"Error in transcription: {str(e)}")
+                logger.error(f"Error in transcription: {str(e)}")
                 await ws.send_json({"type": "error", "error": str(e)})
 
         try:
@@ -116,11 +131,14 @@ async def websocket_transcribe(ws: WebSocket):
                 # Receive base64 encoded audio chunk
                 data = await ws.receive_json()
                 if 'chunk' not in data:
+                    logger.warning("Received message without chunk data")
                     continue
                     
                 # Decode base64
                 try:
                     chunk_data = data['chunk']
+                    logger.info(f"Received chunk data type: {type(chunk_data)}")
+                    
                     if isinstance(chunk_data, str):
                         # Add padding if needed
                         padding = len(chunk_data) % 4
@@ -130,23 +148,24 @@ async def websocket_transcribe(ws: WebSocket):
                     else:
                         audio_chunk = chunk_data
                         
+                    logger.info(f"Decoded audio chunk size: {len(audio_chunk)} bytes")
                     buffer.extend(audio_chunk)
                     audio_received += len(audio_chunk)
                     
                     # Start transcription after receiving enough audio
                     if not transcribing and audio_received > 40960:  # ~1s of audio
-                        print(f"Starting transcription after receiving {audio_received} bytes")
+                        logger.info(f"Starting transcription after receiving {audio_received} bytes")
                         transcribing = True
                         task = asyncio.create_task(run_transcribe())
                         
                 except Exception as e:
-                    print(f"Error processing chunk: {str(e)}")
+                    logger.error(f"Error processing chunk: {str(e)}")
                     await ws.send_json({"type": "error", "error": str(e)})
                     
         except WebSocketDisconnect:
-            print("[WS] Client disconnected.")
+            logger.info("[WS] Client disconnected.")
         except Exception as e:
-            print(f"WebSocket error: {str(e)}")
+            logger.error(f"WebSocket error: {str(e)}")
             await ws.send_json({"type": "error", "error": str(e)})
         finally:
             if task:
@@ -155,6 +174,7 @@ async def websocket_transcribe(ws: WebSocket):
         # On disconnect: send final transcript
         try:
             if buffer:
+                logger.info("Processing final transcription...")
                 tmp.seek(0)
                 tmp.write(buffer)
                 tmp.flush()
@@ -173,13 +193,16 @@ async def websocket_transcribe(ws: WebSocket):
                     
                     segments, info = model.transcribe(tmp.name, beam_size=1)
                     text = "".join([seg.text for seg in segments])
+                    logger.info(f"Final transcription: {text}")
                     await ws.send_json({
                         "type": "final",
                         "text": text,
                         "language": info.language
                     })
+                else:
+                    logger.warning("No processed audio data available for final transcription")
         except Exception as e:
-            print(f"Error in final transcription: {str(e)}")
+            logger.error(f"Error in final transcription: {str(e)}")
             await ws.send_json({"type": "error", "error": str(e)})
         
         await ws.close()
